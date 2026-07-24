@@ -1,0 +1,45 @@
+# Dados privados e artefatos locais
+local_samples/
+private_templates/
+uploads/
+outputs/
+generated/
+.tmp_aep_audit/
+
+# Documentos, planilhas e imagens reais
+*.doc
+*.docx
+*.xlsx
+*.xls
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# Exceções exclusivamente para fixtures sintéticas públicas
+!tests/fixtures/public_synthetic/**/*.doc
+!tests/fixtures/public_synthetic/**/*.docx
+!tests/fixtures/public_synthetic/**/*.xlsx
+!tests/fixtures/public_synthetic/**/*.xls
+!tests/fixtures/public_synthetic/**/*.png
+!tests/fixtures/public_synthetic/**/*.jpg
+!tests/fixtures/public_synthetic/**/*.jpeg
+!tests/fixtures/public_synthetic/**/*.webp
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Configuração local
+.env
+
+# Editores e sistema operacional
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
