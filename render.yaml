@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: automatizador-aep-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeploy: true
+    numInstances: 1
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: AEP_HOST
+        value: 0.0.0.0
+      - key: AEP_PORT
+        value: "10000"
+      - key: AEP_ALLOWED_ORIGINS
+        value: https://kinhoog.github.io
+      - key: AEP_REQUIRE_ORIGIN
+        value: "true"
+      - key: AEP_RUNTIME_DIR
+        value: /tmp/aep-jobs
+      - key: AEP_JOB_TTL_SECONDS
+        value: "900"
+      - key: AEP_JOB_TTL_MINUTES
+        value: "15"
+      - key: AEP_TEMPLATE_PATH
+        value: /tmp/aep-runtime/template/aep_template.docx
+      - key: AEP_TEMPLATE_MANIFEST_PATH
+        value: /tmp/aep-runtime/template/aep_template.manifest.json
+      - key: AEP_HOSTED_TEMPLATE_BASE64_FILE
+        value: /etc/secrets/aep_template.docx.b64
+      - key: AEP_HOSTED_TEMPLATE_MANIFEST_BASE64_FILE
+        value: /etc/secrets/aep_template.manifest.json.b64
+      - key: AEP_HOSTED_COMPATIBILITY_PROFILE_BASE64_FILE
+        value: /etc/secrets/aep_compatibility_profile.json.b64
+      - key: AEP_ALLOW_SYNTHETIC_TEMPLATE_FALLBACK
+        value: "false"
+      - key: AEP_RENDER_ON_GENERATE
+        value: "false"

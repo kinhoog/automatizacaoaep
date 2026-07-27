@@ -80,7 +80,7 @@ def _population_for_ghe(document_bytes: bytes, code: str) -> int:
     raise AssertionError(f"O GHE sintético {code} não foi encontrado na saída.")
 
 
-def test_health_endpoint_reports_local_ready_pipeline(
+def test_health_endpoint_reports_temporary_ready_pipeline(
     api_client: TestClient,
 ) -> None:
     response = api_client.get("/api/health")
@@ -89,9 +89,9 @@ def test_health_endpoint_reports_local_ready_pipeline(
     assert response.json() == {
         "status": "ok",
         "service": "Automatizador de Documentos AEP",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "pipeline_ready": True,
-        "processing": "local",
+        "processing": "temporary",
     }
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["x-content-type-options"] == "nosniff"
@@ -113,7 +113,7 @@ def test_health_and_validation_fail_closed_without_verified_private_template(
     health = api_client.get("/api/health")
     validation = api_client.post("/api/validate")
 
-    assert health.status_code == 200
+    assert health.status_code == 503
     assert health.json()["status"] == "degraded"
     assert health.json()["pipeline_ready"] is False
     assert validation.status_code == 503
@@ -609,3 +609,118 @@ def test_orphan_cleanup_retries_after_transient_failure(
 
     assert second == 1
     assert not orphan.exists()
+
+
+def test_cors_allows_only_configured_github_pages_origin(
+    api_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(web_app, "REQUIRE_ORIGIN", True)
+
+    allowed = api_client.get(
+        "/api/jobs/" + ("a" * 32),
+        headers={"Origin": "https://kinhoog.github.io"},
+    )
+    rejected = api_client.get(
+        "/api/jobs/" + ("a" * 32),
+        headers={"Origin": "https://example.invalid"},
+    )
+    missing = api_client.get("/api/jobs/" + ("a" * 32))
+    preflight = api_client.options(
+        "/api/generate",
+        headers={
+            "Origin": "https://kinhoog.github.io",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+    assert allowed.status_code == 404
+    assert (
+        allowed.headers["access-control-allow-origin"]
+        == "https://kinhoog.github.io"
+    )
+    assert rejected.status_code == 403
+    assert "access-control-allow-origin" not in rejected.headers
+    assert missing.status_code == 403
+    assert preflight.status_code == 200
+    assert (
+        preflight.headers["access-control-allow-origin"]
+        == "https://kinhoog.github.io"
+    )
+    assert "*" not in preflight.headers["access-control-allow-methods"]
+
+
+def test_every_api_response_disables_caching(
+    api_client: TestClient,
+) -> None:
+    response = api_client.get("/api/jobs/" + ("f" * 32))
+
+    assert response.status_code == 404
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"
+
+
+def test_complete_document_download_then_explicit_idempotent_deletion(
+    api_client: TestClient,
+    validate_job: dict[str, Any],
+) -> None:
+    job_id = validate_job["job_id"]
+    document = _generate_and_download(api_client, validate_job)
+    job_dir = web_app.JOBS[job_id].job_dir
+
+    assert document.startswith(b"PK\x03\x04")
+    with zipfile.ZipFile(io.BytesIO(document)) as package:
+        assert "word/document.xml" in package.namelist()
+    assert job_id in web_app.JOBS
+    assert job_dir.is_dir()
+
+    first = api_client.delete(f"/api/jobs/{job_id}")
+    second = api_client.delete(f"/api/jobs/{job_id}")
+
+    assert first.status_code == 204
+    assert second.status_code == 204
+    assert job_id not in web_app.JOBS
+    assert not job_dir.exists()
+
+
+def test_download_endpoint_deletes_only_after_complete_response(
+    api_client: TestClient,
+    validate_job: dict[str, Any],
+) -> None:
+    job_id = validate_job["job_id"]
+    generation = api_client.post(
+        "/api/generate",
+        json={
+            "job_id": job_id,
+            "reconciliations": [_extra_ergo_decision(validate_job)],
+        },
+    )
+    assert generation.status_code == 202
+    completed = _wait_for_terminal_status(api_client, job_id)
+    assert completed["downloads"]["download"].endswith("/download")
+    job_dir = web_app.JOBS[job_id].job_dir
+
+    response = api_client.get(completed["downloads"]["download"])
+
+    assert response.status_code == 200
+    assert response.content.startswith(b"PK\x03\x04")
+    assert int(response.headers["content-length"]) == len(response.content)
+    with zipfile.ZipFile(io.BytesIO(response.content)) as package:
+        assert package.testzip() is None
+    assert job_id not in web_app.JOBS
+    assert not job_dir.exists()
+    assert api_client.get(f"/api/jobs/{job_id}").status_code == 404
+
+
+def test_abandoned_validated_job_is_removed_by_ttl(
+    api_client: TestClient,
+    validate_job: dict[str, Any],
+) -> None:
+    job_id = validate_job["job_id"]
+    record = web_app.JOBS[job_id]
+    record.updated_at = time.time() - web_app.JOB_TTL_SECONDS - 1
+
+    assert web_app.cleanup_expired_jobs() == 1
+    assert job_id not in web_app.JOBS
+    assert not record.job_dir.exists()

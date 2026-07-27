@@ -50,6 +50,7 @@ def api_client(
     monkeypatch.setattr(web_app, "RUNTIME_ROOT", runtime_root)
     monkeypatch.setattr(web_app, "PIPELINE_INSTANCE", pipeline)
     monkeypatch.setattr(web_app, "JOB_TTL_SECONDS", 60)
+    monkeypatch.setattr(web_app, "REQUIRE_ORIGIN", False)
     web_app.JOBS.clear()
     web_app.RUNNING_TASKS.clear()
 

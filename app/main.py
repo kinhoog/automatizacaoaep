@@ -24,17 +24,25 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Callable, Iterable, Mapping
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
+from app.config import settings as default_settings
 from app.services.file_security import (
     UploadValidationError,
     inspect_file,
+)
+from app.services.hosted_template import (
+    HostedTemplateError,
+    materialize_hosted_template,
+    remove_materialized_template,
 )
 
 try:
@@ -42,14 +50,18 @@ try:
 except ImportError:  # A API também pode ser importada durante o bootstrap.
     DocumentPipeline = None  # type: ignore[assignment,misc]
 
-PIPELINE_INSTANCE = DocumentPipeline() if DocumentPipeline is not None else None
+PIPELINE_INSTANCE: Any | None = None
+PIPELINE_STARTUP_ERROR: str | None = None
+HOSTED_TEMPLATE_RUNTIME_DIR: Path | None = None
+DEFAULT_PIPELINE_OWNED = False
 
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent
 STATIC_DIR = APP_DIR / "static"
-RUNTIME_ROOT = Path(
-    os.getenv("AEP_RUNTIME_DIR", str(PROJECT_ROOT / "uploads"))
+RUNTIME_ROOT = (
+    default_settings.runtime_dir
+    or Path(os.getenv("AEP_RUNTIME_DIR", str(PROJECT_ROOT / "uploads")))
 ).expanduser()
 MAX_FILE_SIZE = max(1, int(os.getenv("AEP_MAX_FILE_MB", "25"))) * 1024 * 1024
 MAX_REQUEST_SIZE = max(
@@ -57,7 +69,9 @@ MAX_REQUEST_SIZE = max(
 )
 MAX_FORM_FIELDS = 16
 MAX_TEXT_PART_SIZE = 16 * 1024
-JOB_TTL_SECONDS = max(60, int(os.getenv("AEP_JOB_TTL_SECONDS", "3600")))
+JOB_TTL_SECONDS = default_settings.job_ttl_seconds
+ALLOWED_ORIGINS = default_settings.allowed_origins
+REQUIRE_ORIGIN = default_settings.require_origin
 JOB_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 SAFE_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9._-]+")
 
@@ -239,6 +253,7 @@ class JobRecord:
     document_path: Path | None = None
     validation_report_path: Path | None = None
     error_message: str | None = None
+    active_downloads: int = 0
 
     def touch(self) -> None:
         self.updated_at = time.time()
@@ -802,6 +817,59 @@ def _instantiate_pipeline(record: JobRecord) -> Any:
     return DocumentPipeline(**kwargs)
 
 
+def _initialize_default_pipeline() -> None:
+    """Inicializa o compilador somente após validar os secrets hospedados."""
+
+    global DEFAULT_PIPELINE_OWNED
+    global HOSTED_TEMPLATE_RUNTIME_DIR
+    global PIPELINE_INSTANCE
+    global PIPELINE_STARTUP_ERROR
+
+    if PIPELINE_INSTANCE is not None or DocumentPipeline is None:
+        return
+    materialized_runtime: Path | None = None
+    try:
+        materialized = materialize_hosted_template(default_settings)
+        materialized_runtime = materialized.runtime_dir
+        HOSTED_TEMPLATE_RUNTIME_DIR = materialized.runtime_dir
+        PIPELINE_INSTANCE = DocumentPipeline(settings=materialized.settings)
+        PIPELINE_STARTUP_ERROR = None
+        DEFAULT_PIPELINE_OWNED = True
+    except HostedTemplateError as exc:
+        remove_materialized_template(materialized_runtime)
+        HOSTED_TEMPLATE_RUNTIME_DIR = None
+        PIPELINE_INSTANCE = None
+        PIPELINE_STARTUP_ERROR = exc.code
+        DEFAULT_PIPELINE_OWNED = False
+        logger.error(
+            "Pipeline recusada por configuração privada inválida código=%s",
+            exc.code,
+        )
+    except Exception as exc:
+        remove_materialized_template(materialized_runtime)
+        HOSTED_TEMPLATE_RUNTIME_DIR = None
+        PIPELINE_INSTANCE = None
+        PIPELINE_STARTUP_ERROR = "pipeline_startup_failed"
+        DEFAULT_PIPELINE_OWNED = False
+        logger.error(
+            "Pipeline não pôde ser inicializada tipo=%s",
+            type(exc).__name__,
+        )
+
+
+def _shutdown_default_pipeline() -> None:
+    global DEFAULT_PIPELINE_OWNED
+    global HOSTED_TEMPLATE_RUNTIME_DIR
+    global PIPELINE_INSTANCE
+
+    if not DEFAULT_PIPELINE_OWNED:
+        return
+    PIPELINE_INSTANCE = None
+    remove_materialized_template(HOSTED_TEMPLATE_RUNTIME_DIR)
+    HOSTED_TEMPLATE_RUNTIME_DIR = None
+    DEFAULT_PIPELINE_OWNED = False
+
+
 def _pipeline_is_ready() -> bool:
     if DocumentPipeline is None or PIPELINE_INSTANCE is None:
         return False
@@ -1012,6 +1080,11 @@ def _job_snapshot(record: JobRecord) -> dict[str, Any]:
             if record.document_path is not None
             else None
         ),
+        "download": (
+            f"/api/jobs/{record.job_id}/download"
+            if record.document_path is not None
+            else None
+        ),
         "validation_report": (
             f"/api/jobs/{record.job_id}/validation-report"
             if record.validation_report_path is not None
@@ -1076,6 +1149,23 @@ def _remove_runtime_tree(path: Path, *, attempts: int = 3) -> bool:
     return False
 
 
+def _delete_job_data(job_id: str) -> bool:
+    """Remove um job conhecido ou órfão sem sair da raiz temporária."""
+
+    if not JOB_ID_PATTERN.fullmatch(job_id):
+        return False
+    with JOBS_LOCK:
+        record = JOBS.get(job_id)
+    job_dir = record.job_dir if record is not None else _safe_job_dir(job_id)
+    if not _remove_runtime_tree(job_dir):
+        return False
+    with JOBS_LOCK:
+        if record is None or JOBS.get(job_id) is record:
+            JOBS.pop(job_id, None)
+    _discard_pipeline_state(job_id)
+    return True
+
+
 def _cleanup_orphan_runtime_dirs(timestamp: float) -> int:
     try:
         RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1123,11 +1213,7 @@ def cleanup_expired_jobs(now: float | None = None) -> int:
 
     removed = 0
     for record in expired:
-        if _remove_runtime_tree(record.job_dir):
-            with JOBS_LOCK:
-                if JOBS.get(record.job_id) is record:
-                    JOBS.pop(record.job_id, None)
-            _discard_pipeline_state(record.job_id)
+        if _delete_job_data(record.job_id):
             removed += 1
         else:
             logger.warning(
@@ -1146,6 +1232,7 @@ async def _cleanup_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    await run_in_threadpool(_initialize_default_pipeline)
     await run_in_threadpool(cleanup_expired_jobs)
     cleanup_task = asyncio.create_task(_cleanup_loop())
     try:
@@ -1156,57 +1243,99 @@ async def lifespan(_: FastAPI):
             await cleanup_task
         except asyncio.CancelledError:
             pass
+        await run_in_threadpool(_shutdown_default_pipeline)
 
 
 app = FastAPI(
     title="Automatizador de Documentos AEP",
-    version="0.1.0",
+    version="0.2.0",
     docs_url=None,
     redoc_url=None,
     openapi_url="/api/openapi.json",
     lifespan=lifespan,
 )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(ALLOWED_ORIGINS),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Accept", "Content-Type"],
+    expose_headers=["Content-Disposition", "Content-Length"],
+    max_age=600,
+)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-@app.middleware("http")
-async def security_headers(request: Request, call_next: Callable[..., Any]):
-    if request.headers.get("content-length"):
-        try:
-            if int(request.headers["content-length"]) > MAX_REQUEST_SIZE:
-                return JSONResponse(
-                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                    content={
-                        "detail": {
-                            "code": "request_too_large",
-                            "message": (
-                                "O conjunto de arquivos excede o limite permitido."
-                            ),
-                            "fields": {},
-                        }
-                    },
-                )
-        except ValueError:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"detail": "Cabeçalho de tamanho inválido."},
-            )
-
-    response = await call_next(request)
+def _apply_security_headers(response: Response, *, api_path: bool) -> Response:
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Permissions-Policy"] = (
         "camera=(), microphone=(), geolocation=(), payment=()"
     )
+    if api_path:
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next: Callable[..., Any]):
+    api_path = request.url.path.startswith("/api/")
+    protected_api = api_path and request.url.path != "/api/health"
+    origin = request.headers.get("origin")
+    if protected_api and (
+        (REQUIRE_ORIGIN and not origin)
+        or (origin is not None and origin not in ALLOWED_ORIGINS)
+    ):
+        return _apply_security_headers(
+            JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "detail": {
+                        "code": "origin_not_allowed",
+                        "message": "Origem da requisição não autorizada.",
+                    }
+                },
+            ),
+            api_path=True,
+        )
+
+    if request.headers.get("content-length"):
+        try:
+            if int(request.headers["content-length"]) > MAX_REQUEST_SIZE:
+                return _apply_security_headers(
+                    JSONResponse(
+                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                        content={
+                            "detail": {
+                                "code": "request_too_large",
+                                "message": (
+                                    "O conjunto de arquivos excede o limite permitido."
+                                ),
+                                "fields": {},
+                            }
+                        },
+                    ),
+                    api_path=api_path,
+                )
+        except ValueError:
+            return _apply_security_headers(
+                JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"detail": "Cabeçalho de tamanho inválido."},
+                ),
+                api_path=api_path,
+            )
+
+    response = await call_next(request)
+    _apply_security_headers(response, api_path=api_path)
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; script-src 'self'; style-src 'self'; "
         "img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; "
         "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
         "form-action 'self'"
     )
-    if request.url.path.startswith("/api/"):
-        response.headers["Cache-Control"] = "no-store"
     return response
 
 
@@ -1220,16 +1349,23 @@ async def home() -> FileResponse:
 
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]:
+async def health() -> JSONResponse:
     cleanup_expired_jobs()
     pipeline_ready = _pipeline_is_ready()
-    return {
-        "status": "ok" if pipeline_ready else "degraded",
-        "service": "Automatizador de Documentos AEP",
-        "version": app.version,
-        "pipeline_ready": pipeline_ready,
-        "processing": "local",
-    }
+    return JSONResponse(
+        status_code=(
+            status.HTTP_200_OK
+            if pipeline_ready
+            else status.HTTP_503_SERVICE_UNAVAILABLE
+        ),
+        content={
+            "status": "ok" if pipeline_ready else "degraded",
+            "service": "Automatizador de Documentos AEP",
+            "version": app.version,
+            "pipeline_ready": pipeline_ready,
+            "processing": "temporary",
+        },
+    )
 
 
 @app.post("/api/validate")
@@ -1613,28 +1749,48 @@ def _download_response(
     *,
     media_type: str,
     filename: str,
+    delete_after: bool = False,
 ) -> FileResponse:
     if path is None or not path.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Arquivo ainda não disponível.",
         )
-    allowed_roots = (
-        record.job_dir,
-        PROJECT_ROOT / "outputs",
-        PROJECT_ROOT / "generated",
-    )
-    if not any(_is_within(path, root) for root in allowed_roots):
+    if not _is_within(path, record.job_dir):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Arquivo não encontrado.",
         )
-    record.touch()
+    with JOBS_LOCK:
+        current = JOBS.get(record.job_id)
+        if current is not record:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Execução não encontrada.",
+            )
+        record.active_downloads += 1
+        record.touch()
+
+    def after_response() -> None:
+        with JOBS_LOCK:
+            current = JOBS.get(record.job_id)
+            if current is record:
+                current.active_downloads = max(0, current.active_downloads - 1)
+                current.touch()
+        if delete_after:
+            if not _delete_job_data(record.job_id):
+                logger.warning(
+                    "Falha ao excluir job após download job=%s; TTL mantido",
+                    record.job_id,
+                )
+            return
+
     return FileResponse(
         path,
         media_type=media_type,
         filename=filename,
         headers={"Cache-Control": "no-store"},
+        background=BackgroundTask(after_response),
     )
 
 
@@ -1652,6 +1808,23 @@ async def download_document(job_id: str) -> FileResponse:
     )
 
 
+@app.get("/api/jobs/{job_id}/download")
+async def download_and_delete_document(job_id: str) -> FileResponse:
+    """Baixa o DOCX e agenda a exclusão após o envio da resposta."""
+
+    record = _get_job(job_id.lower())
+    return _download_response(
+        record,
+        record.document_path,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.document"
+        ),
+        filename="Documento AEP - AUTOMATICO.docx",
+        delete_after=True,
+    )
+
+
 @app.get("/api/jobs/{job_id}/validation-report")
 async def download_validation_report(job_id: str) -> FileResponse:
     record = _get_job(job_id.lower())
@@ -1661,3 +1834,35 @@ async def download_validation_report(job_id: str) -> FileResponse:
         media_type="application/json",
         filename="Relatorio de Validacao AEP.json",
     )
+
+
+@app.delete("/api/jobs/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_job(job_id: str) -> Response:
+    normalized = job_id.strip().lower()
+    if not JOB_ID_PATTERN.fullmatch(normalized):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Execução não encontrada.",
+        )
+    with JOBS_LOCK:
+        record = JOBS.get(normalized)
+    if record is not None and (
+        record.status in {"receiving", "validating", "generating"}
+        or record.active_downloads > 0
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "job_busy",
+                "message": "A execução ainda está sendo processada.",
+            },
+        )
+    if not _delete_job_data(normalized):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "cleanup_pending",
+                "message": "A exclusão será repetida pela limpeza automática.",
+            },
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

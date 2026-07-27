@@ -1,0 +1,108 @@
+name: Verificações
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Testes Python
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v6
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependências
+        run: python -m pip install -e ".[dev]"
+
+      - name: Executar testes
+        run: python -m pytest -q
+
+  docker:
+    name: Container e health check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v6
+
+      - name: Construir imagem
+        run: docker build --tag aep-backend:ci .
+
+      - name: Verificar conteúdo público da imagem
+        run: |
+          docker run --rm --entrypoint sh aep-backend:ci -c '
+            test ! -e /app/private_templates &&
+            test ! -e /app/local_samples &&
+            test ! -e /app/uploads &&
+            test ! -e /app/outputs &&
+            test ! -e /app/generated &&
+            ! find /app -type f \( -name "*.doc" -o -name "*.docx" -o -name "*.xlsx" -o -name "*.xls" \) -print -quit | grep -q .
+          '
+
+      - name: Iniciar container sintético
+        run: |
+          docker run --detach \
+            --name aep-backend-ci \
+            --publish 18080:18080 \
+            --env PORT=18080 \
+            --env AEP_ALLOWED_ORIGINS=https://kinhoog.github.io \
+            --env AEP_ALLOW_SYNTHETIC_TEMPLATE_FALLBACK=true \
+            --env AEP_RUNTIME_DIR=/tmp/aep-jobs \
+            --env AEP_JOB_TTL_SECONDS=900 \
+            aep-backend:ci
+
+      - name: Aguardar prontidão
+        run: |
+          ready=false
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:18080/api/health \
+              | python -c 'import json,sys; data=json.load(sys.stdin); assert data["status"] == "ok" and data["pipeline_ready"] is True'
+            then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          test "$ready" = true
+
+      - name: Verificar usuário, temporários, CORS e health check
+        run: |
+          test "$(docker exec aep-backend-ci id -u)" != "0"
+          docker exec aep-backend-ci id -G \
+            | tr ' ' '\n' \
+            | grep --quiet --line-regexp '1000'
+          docker exec aep-backend-ci test -w /tmp/aep-jobs
+          curl --fail --silent --dump-header /tmp/aep-headers.txt \
+            --output /dev/null \
+            --header "Origin: https://kinhoog.github.io" \
+            http://127.0.0.1:18080/api/health
+          grep --ignore-case --quiet \
+            '^access-control-allow-origin: https://kinhoog.github.io' \
+            /tmp/aep-headers.txt
+          for attempt in $(seq 1 30); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' aep-backend-ci)"
+            if test "$status" = "healthy"; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker inspect aep-backend-ci
+          exit 1
+
+      - name: Exibir logs em caso de falha
+        if: failure()
+        run: docker logs aep-backend-ci
+
+      - name: Encerrar container
+        if: always()
+        run: docker rm --force aep-backend-ci || true

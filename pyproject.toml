@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "automatizador-documentos-aep"
-version = "0.1.0"
-description = "Compilador local de documentos AEP em formato Word editável."
+version = "0.2.0"
+description = "Compilador web de documentos AEP em formato Word editável."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

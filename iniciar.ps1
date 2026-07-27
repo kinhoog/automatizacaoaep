@@ -70,6 +70,15 @@ $listenPort = if ($env:AEP_PORT) { [int]$env:AEP_PORT } else { 8000 }
 $browserAddress = if ($listenAddress -in @("0.0.0.0", "::")) { "127.0.0.1" } else { $listenAddress }
 $systemUrl = "http://${browserAddress}:$listenPort"
 
+# O inicializador é exclusivo para desenvolvimento em loopback. A implantação
+# hospedada sobrescreve estas opções e exige a origem oficial do GitHub Pages.
+if (-not (Test-Path Env:AEP_REQUIRE_ORIGIN)) {
+    $env:AEP_REQUIRE_ORIGIN = "false"
+}
+if (-not (Test-Path Env:AEP_ALLOWED_ORIGINS)) {
+    $env:AEP_ALLOWED_ORIGINS = $systemUrl
+}
+
 if (-not $SemAbrirNavegador) {
     Start-Process $systemUrl
 }

@@ -338,10 +338,17 @@ def _load_compatibility_profile(settings: Settings) -> Mapping[str, Any]:
             code="compatibility_profile_unavailable",
         )
     private_root = (settings.base_dir / "private_templates").resolve()
+    hosted_root = settings.trusted_private_runtime_dir
+    trusted_roots = [private_root]
+    if hosted_root is not None:
+        trusted_roots.append(hosted_root.resolve())
     resolved = path.resolve()
     if (
-        resolved == private_root
-        or private_root not in resolved.parents
+        path.is_symlink()
+        or not any(
+            resolved != trusted_root and trusted_root in resolved.parents
+            for trusted_root in trusted_roots
+        )
         or not resolved.is_file()
     ):
         raise CompatibilityProfileError(
