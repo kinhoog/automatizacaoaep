@@ -1,0 +1,159 @@
+{
+  "fixture": true,
+  "page": {
+    "orientation": "portrait",
+    "size": "A4"
+  },
+  "privacy": "Conteudo 100% sintetico; nao representa pessoa ou empresa real.",
+  "schema_version": 1,
+  "slots": [
+    {
+      "content_type": "text",
+      "marker": "{{RAZAO_SOCIAL}}",
+      "name": "razao_social",
+      "required": true
+    },
+    {
+      "content_type": "text",
+      "marker": "{{COMPETENCIA}}",
+      "name": "competencia",
+      "required": true
+    },
+    {
+      "content_type": "image",
+      "marker": "{{LOGO_EMPRESA_OPCIONAL}}",
+      "name": "logo_empresa",
+      "required": false
+    },
+    {
+      "content_type": "image",
+      "marker": "{{CARTAO_CNPJ}}",
+      "name": "cartao_cnpj",
+      "required": true
+    },
+    {
+      "content_type": "table",
+      "marker": "{{HISTORICO_REVISOES}}",
+      "name": "historico_revisoes",
+      "required": true
+    },
+    {
+      "content_type": "field",
+      "marker": "{{SUMARIO}}",
+      "name": "sumario",
+      "required": true
+    },
+    {
+      "content_type": "rich_text",
+      "marker": "{{OBJETIVO}}",
+      "name": "objetivo",
+      "required": true
+    },
+    {
+      "content_type": "rich_text",
+      "marker": "{{FUNDAMENTACAO_LEGAL}}",
+      "name": "fundamentacao_legal",
+      "required": true
+    },
+    {
+      "content_type": "rich_text",
+      "marker": "{{METODOLOGIA}}",
+      "name": "metodologia",
+      "required": true
+    },
+    {
+      "content_type": "table",
+      "marker": "{{GHE_HIERARQUIA}}",
+      "name": "ghe_hierarquia",
+      "required": true
+    },
+    {
+      "content_type": "rich_text",
+      "marker": "{{RESUMO_DIAGNOSTICO}}",
+      "name": "resumo_diagnostico",
+      "required": true
+    },
+    {
+      "content_type": "rich_content",
+      "marker": "{{RESULTADOS_ERGO}}",
+      "name": "resultados_ergo",
+      "required": true
+    },
+    {
+      "content_type": "image_group",
+      "marker": "{{RESUMO_PSICOSSOCIAL}}",
+      "name": "resumo_psicossocial",
+      "required": true
+    },
+    {
+      "content_type": "rich_content",
+      "marker": "{{ANALISES_PSICOSSOCIAIS}}",
+      "name": "analises_psicossociais",
+      "required": true
+    },
+    {
+      "content_type": "table",
+      "marker": "{{PERGUNTAS_FAVORABILIDADE}}",
+      "name": "perguntas_favorabilidade",
+      "required": true
+    },
+    {
+      "content_type": "table",
+      "marker": "{{PRIORIZACOES}}",
+      "name": "priorizacoes",
+      "required": true
+    },
+    {
+      "content_type": "table",
+      "marker": "{{PLANO_ACAO}}",
+      "name": "plano_acao",
+      "required": true
+    },
+    {
+      "content_type": "rich_text",
+      "marker": "{{CONCLUSAO_TECNICA}}",
+      "name": "conclusao_tecnica",
+      "required": true
+    },
+    {
+      "content_type": "rich_text",
+      "marker": "{{TERMO_ENCERRAMENTO}}",
+      "name": "termo_encerramento",
+      "required": true
+    },
+    {
+      "content_type": "signature_area",
+      "marker": "{{ASSINATURAS}}",
+      "name": "assinaturas",
+      "required": true
+    },
+    {
+      "content_type": "rich_content",
+      "marker": "{{PAGINA_INSTITUCIONAL}}",
+      "name": "pagina_institucional",
+      "required": true
+    }
+  ],
+  "template": "template_aep_sintetico.docx",
+  "test_expectations": {
+    "action_log_column_must_be_blank": true,
+    "card_required": true,
+    "ergo_ghe_codes": [
+      "10",
+      "20",
+      "30",
+      "99"
+    ],
+    "logo_optional": true,
+    "official_ghe_codes": [
+      "10",
+      "20",
+      "30"
+    ],
+    "official_ghe_count": 3,
+    "official_population": 16,
+    "psychosocial_image_count": 13,
+    "unmatched_ergo_code": "99"
+  },
+  "validity": "SEM VALIDADE"
+}

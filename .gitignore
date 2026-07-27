@@ -16,18 +16,27 @@ generated/
 *.jpeg
 *.webp
 
-# Exceções exclusivamente para fixtures sintéticas públicas
-!tests/fixtures/public_synthetic/**/*.doc
-!tests/fixtures/public_synthetic/**/*.docx
-!tests/fixtures/public_synthetic/**/*.xlsx
-!tests/fixtures/public_synthetic/**/*.xls
-!tests/fixtures/public_synthetic/**/*.png
-!tests/fixtures/public_synthetic/**/*.jpg
-!tests/fixtures/public_synthetic/**/*.jpeg
-!tests/fixtures/public_synthetic/**/*.webp
+# Exceções nominais exclusivamente para fixtures sintéticas públicas
+!tests/fixtures/public_synthetic/cartao_cnpj_sintetico.png
+!tests/fixtures/public_synthetic/ergo_sintetico.doc
+!tests/fixtures/public_synthetic/ghe_sinteticos.xlsx
+!tests/fixtures/public_synthetic/logo_sintetica_opcional.png
+!tests/fixtures/public_synthetic/psicossocial_sintetico.docx
+!tests/fixtures/public_synthetic/tecnico_integrado_sintetico.docx
+!tests/fixtures/public_synthetic/template_aep_sintetico.docx
+
+# Renderizações, instaladores e pacotes locais
+*.pdf
+*.log
+*.msi
+*.zip
+*.7z
+*.rar
+LibreOffice_*/
 
 # Python
-.venv/
+.venv*/
+.runtime_runner/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -37,6 +46,8 @@ htmlcov/
 
 # Configuração local
 .env
+.env.*
+!.env.example
 
 # Editores e sistema operacional
 .idea/
