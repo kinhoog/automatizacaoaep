@@ -134,9 +134,17 @@ def _map_header(values: tuple[Any, ...]) -> _Columns:
     return columns
 
 
+def _ensure_worksheet_dimensions(worksheet: Worksheet) -> None:
+    """Populate missing bounds in valid XLSX files without a dimension tag."""
+
+    if worksheet.max_row is None or worksheet.max_column is None:
+        worksheet.calculate_dimension(force=True)
+
+
 def _find_header(workbook: Any) -> tuple[Worksheet, int, _Columns]:
     best: tuple[int, Worksheet, int, _Columns] | None = None
     for worksheet in workbook.worksheets:
+        _ensure_worksheet_dimensions(worksheet)
         for row_number, row in enumerate(
             worksheet.iter_rows(min_row=1, max_row=min(60, worksheet.max_row)),
             start=1,
@@ -216,6 +224,7 @@ class GHEExtractor:
         found_details: set[str] = set()
         ignored_headers = list(result.ignored_person_columns)
         for worksheet in workbook.worksheets:
+            _ensure_worksheet_dimensions(worksheet)
             sheet_code = canonical_ghe_code(worksheet.title)
             if sheet_code not in by_code:
                 continue

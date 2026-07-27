@@ -82,39 +82,19 @@ def _read_units(source: Path) -> list[_Unit]:
                 continue
             style_name = block.style.name if block.style else None
             style_key = normalize_key(style_name)
-            text_key = normalize_key(text)
-            code, _ = parse_ghe_reference(text)
-            known_heading = (
-                text_key
-                in {
-                    "visao geral",
-                    "pontos positivos",
-                    "pontos criticos",
-                    "indicacoes de melhoria",
-                }
-                or "perguntas de maior relevancia" in text_key
-            )
             numbered_heading = bool(
                 re.match(r"^\d+\.\s+\S", text)
                 and len(text) <= 140
             )
-            ghe_heading = bool(
-                code
-                and len(text) <= 100
+            structural_heading = bool(
+                looks_like_heading(text, style_name)
                 and not style_key.startswith(("list", "lista"))
             )
             units.append(
                 _Unit(
                     kind="paragraph",
                     text=text,
-                    heading=bool(
-                        known_heading
-                        or numbered_heading
-                        or ghe_heading
-                        or style_key.startswith(
-                            ("heading", "titulo", "title", "cabecalho")
-                        )
-                    ),
+                    heading=numbered_heading or structural_heading,
                 )
             )
         else:
