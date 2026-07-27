@@ -31,6 +31,7 @@
     pollTimer: null,
     pollStartedAt: null,
     uploadCount: 0,
+    downloadInProgress: false,
     downloads: {
       document: false,
       validationReport: false,
@@ -274,6 +275,192 @@
     if (size < 1024) return `${size} B`;
     if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
     return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function incompleteArtifactError() {
+    return new ApiError("O arquivo recebido está incompleto. Tente novamente.");
+  }
+
+  function bytesMatch(bytes, offset, expected) {
+    return expected.every((value, index) => bytes[offset + index] === value);
+  }
+
+  async function validateDocxBlob(blob) {
+    if (blob.size < 22) {
+      throw incompleteArtifactError();
+    }
+
+    const localHeader = new Uint8Array(
+      await blob.slice(0, 4).arrayBuffer(),
+    );
+    if (!bytesMatch(localHeader, 0, [0x50, 0x4b, 0x03, 0x04])) {
+      throw incompleteArtifactError();
+    }
+
+    const maximumEndRecordSize = 22 + 0xffff;
+    const tailOffset = Math.max(0, blob.size - maximumEndRecordSize);
+    const tail = new Uint8Array(await blob.slice(tailOffset).arrayBuffer());
+    const view = new DataView(tail.buffer, tail.byteOffset, tail.byteLength);
+    let centralDirectory = null;
+
+    for (let offset = tail.length - 22; offset >= 0; offset -= 1) {
+      if (!bytesMatch(tail, offset, [0x50, 0x4b, 0x05, 0x06])) {
+        continue;
+      }
+      const commentLength = view.getUint16(offset + 20, true);
+      if (offset + 22 + commentLength !== tail.length) {
+        continue;
+      }
+
+      const diskNumber = view.getUint16(offset + 4, true);
+      const centralDirectoryDisk = view.getUint16(offset + 6, true);
+      const diskEntryCount = view.getUint16(offset + 8, true);
+      const totalEntryCount = view.getUint16(offset + 10, true);
+      const size = view.getUint32(offset + 12, true);
+      const start = view.getUint32(offset + 16, true);
+      const endRecordOffset = tailOffset + offset;
+      if (
+        diskNumber !== 0 ||
+        centralDirectoryDisk !== 0 ||
+        diskEntryCount === 0 ||
+        diskEntryCount !== totalEntryCount ||
+        start + size > endRecordOffset
+      ) {
+        continue;
+      }
+      centralDirectory = { start, size, totalEntryCount };
+      break;
+    }
+
+    if (!centralDirectory) {
+      throw incompleteArtifactError();
+    }
+
+    const directoryBytes = new Uint8Array(
+      await blob
+        .slice(
+          centralDirectory.start,
+          centralDirectory.start + centralDirectory.size,
+        )
+        .arrayBuffer(),
+    );
+    const directoryView = new DataView(
+      directoryBytes.buffer,
+      directoryBytes.byteOffset,
+      directoryBytes.byteLength,
+    );
+    const entryNames = new Set();
+    let entryOffset = 0;
+    let parsedEntries = 0;
+    while (entryOffset + 46 <= directoryBytes.length) {
+      if (
+        !bytesMatch(directoryBytes, entryOffset, [0x50, 0x4b, 0x01, 0x02])
+      ) {
+        throw incompleteArtifactError();
+      }
+      const nameLength = directoryView.getUint16(entryOffset + 28, true);
+      const extraLength = directoryView.getUint16(entryOffset + 30, true);
+      const commentLength = directoryView.getUint16(entryOffset + 32, true);
+      const nextOffset =
+        entryOffset + 46 + nameLength + extraLength + commentLength;
+      if (nextOffset > directoryBytes.length) {
+        throw incompleteArtifactError();
+      }
+      entryNames.add(
+        new TextDecoder().decode(
+          directoryBytes.slice(entryOffset + 46, entryOffset + 46 + nameLength),
+        ),
+      );
+      parsedEntries += 1;
+      entryOffset = nextOffset;
+    }
+
+    if (
+      entryOffset !== directoryBytes.length ||
+      parsedEntries !== centralDirectory.totalEntryCount ||
+      !entryNames.has("[Content_Types].xml") ||
+      !entryNames.has("word/document.xml")
+    ) {
+      throw incompleteArtifactError();
+    }
+  }
+
+  async function validateJsonBlob(blob) {
+    try {
+      const parsed = JSON.parse(await blob.text());
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw incompleteArtifactError();
+      }
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw incompleteArtifactError();
+    }
+  }
+
+  async function sha256Hex(blob) {
+    if (!window.crypto?.subtle) {
+      throw new ApiError(
+        "Este navegador não conseguiu verificar a integridade do arquivo.",
+      );
+    }
+    const digest = await window.crypto.subtle.digest(
+      "SHA-256",
+      await blob.arrayBuffer(),
+    );
+    return Array.from(new Uint8Array(digest), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+  }
+
+  async function validateArtifact(response, blob, kind) {
+    if (!blob.size) {
+      throw incompleteArtifactError();
+    }
+
+    const expectedSizeHeader = response.headers.get("X-AEP-Content-Length");
+    if (expectedSizeHeader !== null) {
+      const normalizedSize = expectedSizeHeader.trim();
+      const expectedSize = Number(normalizedSize);
+      if (
+        !/^\d+$/.test(normalizedSize) ||
+        !Number.isSafeInteger(expectedSize) ||
+        expectedSize !== blob.size
+      ) {
+        throw incompleteArtifactError();
+      }
+    }
+
+    const expectedHashHeader = response.headers.get("X-AEP-Content-SHA256");
+    if (expectedHashHeader !== null) {
+      const expectedHash = expectedHashHeader.trim().toLowerCase();
+      if (
+        !/^[a-f0-9]{64}$/.test(expectedHash) ||
+        (await sha256Hex(blob)) !== expectedHash
+      ) {
+        throw incompleteArtifactError();
+      }
+    }
+
+    if (kind === "document") {
+      await validateDocxBlob(blob);
+    } else {
+      await validateJsonBlob(blob);
+    }
+  }
+
+  function updateDownloadControls() {
+    const controls = [
+      [documentLink, state.downloads.document],
+      [reportLink, state.downloads.validationReport],
+      [earlyReportLink, state.downloads.validationReport],
+    ];
+    controls.forEach(([control, available]) => {
+      const disabled = state.downloadInProgress || !available;
+      control.setAttribute("aria-disabled", String(disabled));
+      if (control === documentLink || control === reportLink) {
+        control.classList.toggle("is-disabled", disabled);
+      }
+    });
   }
 
   function extensionAccepted(input, file) {
@@ -691,6 +878,7 @@
     } else {
       earlyReportLink.hidden = true;
     }
+    updateDownloadControls();
     document.querySelector("[data-step-link='3']").disabled = false;
     setStep(3);
   }
@@ -767,17 +955,13 @@
     state.downloads.validationReport = Boolean(downloads.validation_report);
     documentLink.href = "#";
     reportLink.href = "#";
-    documentLink.toggleAttribute("aria-disabled", !state.downloads.document);
-    reportLink.toggleAttribute(
-      "aria-disabled",
-      !state.downloads.validationReport,
-    );
+    updateDownloadControls();
     cleanupStatus.textContent = "";
     document.querySelector("[data-step-link='4']").disabled = false;
     setStep(4);
   }
 
-  async function receiveArtifact(path, filename) {
+  async function receiveArtifact(path, filename, kind) {
     const response = await apiFetch(path, {
       headers: { Accept: "application/octet-stream" },
     });
@@ -785,10 +969,7 @@
       await parseResponse(response);
     }
     const blob = await response.blob();
-    const declaredLength = Number(response.headers.get("Content-Length") || 0);
-    if (!blob.size || (declaredLength > 0 && blob.size !== declaredLength)) {
-      throw new ApiError("O arquivo recebido está incompleto. Tente novamente.");
-    }
+    await validateArtifact(response, blob, kind);
 
     const objectUrl = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
@@ -811,7 +992,13 @@
     if (!jobId || !available || link.getAttribute("aria-disabled") === "true") {
       return;
     }
+    if (state.downloadInProgress) {
+      return;
+    }
 
+    state.downloadInProgress = true;
+    updateDownloadControls();
+    clearErrors();
     link.classList.add("is-downloading");
     link.setAttribute("aria-busy", "true");
     cleanupStatus.textContent = isDocument
@@ -826,6 +1013,7 @@
       await receiveArtifact(
         `/api/jobs/${encodeURIComponent(jobId)}/${suffix}`,
         filename,
+        kind,
       );
 
       if (!isDocument) {
@@ -836,11 +1024,9 @@
 
       const removed = await deleteJob(jobId);
       state.downloads.document = false;
-      documentLink.setAttribute("aria-disabled", "true");
       if (removed) {
         state.jobId = null;
         state.downloads.validationReport = false;
-        reportLink.setAttribute("aria-disabled", "true");
         earlyReportLink.hidden = true;
         cleanupStatus.textContent =
           "Documento recebido e arquivos da execução excluídos.";
@@ -856,6 +1042,8 @@
         showError("Não foi possível baixar o arquivo. Tente novamente.");
       }
     } finally {
+      state.downloadInProgress = false;
+      updateDownloadControls();
       link.classList.remove("is-downloading");
       link.removeAttribute("aria-busy");
     }
@@ -1065,7 +1253,6 @@
   });
 
   for (const link of [documentLink, reportLink]) {
-    link.setAttribute("aria-disabled", "true");
     link.addEventListener("click", (event) => {
       event.preventDefault();
       if (link.getAttribute("aria-disabled") === "true") return;
@@ -1074,11 +1261,17 @@
   }
   earlyReportLink.addEventListener("click", (event) => {
     event.preventDefault();
-    if (earlyReportLink.hidden) return;
+    if (
+      earlyReportLink.hidden ||
+      earlyReportLink.getAttribute("aria-disabled") === "true"
+    ) {
+      return;
+    }
     void downloadArtifact("report");
   });
 
   updateAnalysisMode();
+  updateDownloadControls();
   setStep(1);
   if (!apiBaseUrl) {
     validateButton.disabled = true;

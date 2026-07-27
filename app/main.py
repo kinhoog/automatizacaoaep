@@ -20,6 +20,7 @@ import unicodedata
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import date, datetime, timezone
+from enum import Enum
 from pathlib import Path
 from threading import RLock
 from typing import Any, Callable, Iterable, Mapping
@@ -38,6 +39,7 @@ from app.config import settings as default_settings
 from app.services.file_security import (
     UploadValidationError,
     inspect_file,
+    sha256_file,
 )
 from app.services.hosted_template import (
     HostedTemplateError,
@@ -259,8 +261,17 @@ class JobRecord:
         self.updated_at = time.time()
 
 
+class JobDeletionOutcome(str, Enum):
+    """Resultado interno da tentativa atômica de excluir um job."""
+
+    DELETED = "deleted"
+    BUSY = "busy"
+    RETRY = "retry"
+
+
 JOBS: dict[str, JobRecord] = {}
 JOBS_LOCK = RLock()
+DELETING_JOBS: set[str] = set()
 RUNNING_TASKS: set[asyncio.Task[Any]] = set()
 
 
@@ -1149,21 +1160,40 @@ def _remove_runtime_tree(path: Path, *, attempts: int = 3) -> bool:
     return False
 
 
-def _delete_job_data(job_id: str) -> bool:
-    """Remove um job conhecido ou órfão sem sair da raiz temporária."""
+def _delete_job_data(job_id: str) -> JobDeletionOutcome:
+    """Reserva e remove um job sem competir com processamento ou download."""
 
     if not JOB_ID_PATTERN.fullmatch(job_id):
-        return False
+        return JobDeletionOutcome.RETRY
     with JOBS_LOCK:
         record = JOBS.get(job_id)
-    job_dir = record.job_dir if record is not None else _safe_job_dir(job_id)
-    if not _remove_runtime_tree(job_dir):
-        return False
-    with JOBS_LOCK:
-        if record is None or JOBS.get(job_id) is record:
+        if (
+            job_id in DELETING_JOBS
+            or (
+                record is not None
+                and (
+                    record.status in {"receiving", "validating", "generating"}
+                    or record.active_downloads > 0
+                )
+            )
+        ):
+            return JobDeletionOutcome.BUSY
+        DELETING_JOBS.add(job_id)
+        if record is not None:
             JOBS.pop(job_id, None)
-    _discard_pipeline_state(job_id)
-    return True
+
+    outcome = JobDeletionOutcome.RETRY
+    try:
+        job_dir = record.job_dir if record is not None else _safe_job_dir(job_id)
+        if _remove_runtime_tree(job_dir):
+            _discard_pipeline_state(job_id)
+            outcome = JobDeletionOutcome.DELETED
+    finally:
+        with JOBS_LOCK:
+            if outcome is not JobDeletionOutcome.DELETED and record is not None:
+                JOBS.setdefault(job_id, record)
+            DELETING_JOBS.discard(job_id)
+    return outcome
 
 
 def _cleanup_orphan_runtime_dirs(timestamp: float) -> int:
@@ -1175,7 +1205,7 @@ def _cleanup_orphan_runtime_dirs(timestamp: float) -> int:
         return 0
 
     with JOBS_LOCK:
-        active_ids = set(JOBS)
+        active_ids = set(JOBS) | set(DELETING_JOBS)
     removed = 0
     for child in children:
         if (
@@ -1208,14 +1238,16 @@ def cleanup_expired_jobs(now: float | None = None) -> int:
             record
             for record in JOBS.values()
             if timestamp - record.updated_at >= JOB_TTL_SECONDS
-            and record.status not in {"validating", "generating"}
+            and record.status not in {"receiving", "validating", "generating"}
+            and record.active_downloads == 0
         ]
 
     removed = 0
     for record in expired:
-        if _delete_job_data(record.job_id):
+        outcome = _delete_job_data(record.job_id)
+        if outcome is JobDeletionOutcome.DELETED:
             removed += 1
-        else:
+        elif outcome is JobDeletionOutcome.RETRY:
             logger.warning(
                 "Falha ao limpar execução expirada job=%s; nova tentativa agendada",
                 record.job_id,
@@ -1260,7 +1292,12 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Accept", "Content-Type"],
-    expose_headers=["Content-Disposition", "Content-Length"],
+    expose_headers=[
+        "Content-Disposition",
+        "Content-Length",
+        "X-AEP-Content-Length",
+        "X-AEP-Content-SHA256",
+    ],
     max_age=600,
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -1274,7 +1311,12 @@ def _apply_security_headers(response: Response, *, api_path: bool) -> Response:
         "camera=(), microphone=(), geolocation=(), payment=()"
     )
     if api_path:
-        response.headers["Cache-Control"] = "no-store"
+        existing_cache_control = response.headers.get("Cache-Control", "")
+        response.headers["Cache-Control"] = (
+            "no-store, no-transform"
+            if "no-transform" in existing_cache_control.casefold()
+            else "no-store"
+        )
         response.headers["Pragma"] = "no-cache"
     return response
 
@@ -1743,14 +1785,82 @@ async def job_status(job_id: str) -> dict[str, Any]:
     return _job_snapshot(_get_job(job_id.lower()))
 
 
-def _download_response(
+def _artifact_integrity(path: Path) -> tuple[int, str]:
+    """Calcula metadados dos bytes originais e recusa alteração concorrente."""
+
+    before = path.stat()
+    digest = sha256_file(path)
+    after = path.stat()
+    if (
+        before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+    ):
+        raise OSError("artifact_changed_during_integrity_check")
+    return after.st_size, digest
+
+
+class _DownloadFinalizer:
+    """Executa exatamente uma finalização, inclusive após desconexão."""
+
+    def __init__(self, callback: Callable[[bool], None]) -> None:
+        self._callback = callback
+        self._done = False
+        self._lock = RLock()
+
+    @property
+    def done(self) -> bool:
+        with self._lock:
+            return self._done
+
+    def finish(self, completed: bool) -> None:
+        with self._lock:
+            if self._done:
+                return
+            self._done = True
+        self._callback(completed)
+
+
+class _ManagedFileResponse(FileResponse):
+    """Libera o claim do download mesmo se o envio não terminar."""
+
+    def __init__(
+        self,
+        *args: Any,
+        finalizer: _DownloadFinalizer,
+        **kwargs: Any,
+    ) -> None:
+        self._download_finalizer = finalizer
+        super().__init__(
+            *args,
+            background=BackgroundTask(finalizer.finish, True),
+            **kwargs,
+        )
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if not self._download_finalizer.done:
+                await run_in_threadpool(self._download_finalizer.finish, False)
+
+
+async def _download_response(
+    request: Request,
     record: JobRecord,
     path: Path | None,
     *,
     media_type: str,
     filename: str,
     delete_after: bool = False,
-) -> FileResponse:
+) -> _ManagedFileResponse:
+    if request.headers.get("range") is not None:
+        raise HTTPException(
+            status_code=status.HTTP_416_RANGE_NOT_SATISFIABLE,
+            detail={
+                "code": "partial_download_not_supported",
+                "message": "Baixe o arquivo completo em uma única solicitação.",
+            },
+        )
     if path is None or not path.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1763,7 +1873,7 @@ def _download_response(
         )
     with JOBS_LOCK:
         current = JOBS.get(record.job_id)
-        if current is not record:
+        if current is not record or record.job_id in DELETING_JOBS:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Execução não encontrada.",
@@ -1771,33 +1881,60 @@ def _download_response(
         record.active_downloads += 1
         record.touch()
 
-    def after_response() -> None:
+    try:
+        artifact_size, artifact_sha256 = await run_in_threadpool(
+            _artifact_integrity,
+            path,
+        )
+    except OSError:
         with JOBS_LOCK:
             current = JOBS.get(record.job_id)
             if current is record:
                 current.active_downloads = max(0, current.active_downloads - 1)
                 current.touch()
-        if delete_after:
-            if not _delete_job_data(record.job_id):
+        logger.warning(
+            "Artefato indisponível durante verificação job=%s",
+            record.job_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Arquivo não encontrado.",
+        )
+
+    def after_response(completed: bool) -> None:
+        with JOBS_LOCK:
+            current = JOBS.get(record.job_id)
+            if current is record:
+                current.active_downloads = max(0, current.active_downloads - 1)
+                current.touch()
+        if delete_after and completed:
+            outcome = _delete_job_data(record.job_id)
+            if outcome is JobDeletionOutcome.RETRY:
                 logger.warning(
                     "Falha ao excluir job após download job=%s; TTL mantido",
                     record.job_id,
                 )
             return
 
-    return FileResponse(
+    finalizer = _DownloadFinalizer(after_response)
+    return _ManagedFileResponse(
         path,
         media_type=media_type,
         filename=filename,
-        headers={"Cache-Control": "no-store"},
-        background=BackgroundTask(after_response),
+        headers={
+            "Cache-Control": "no-store, no-transform",
+            "X-AEP-Content-Length": str(artifact_size),
+            "X-AEP-Content-SHA256": artifact_sha256,
+        },
+        finalizer=finalizer,
     )
 
 
 @app.get("/api/jobs/{job_id}/document")
-async def download_document(job_id: str) -> FileResponse:
+async def download_document(job_id: str, request: Request) -> FileResponse:
     record = _get_job(job_id.lower())
-    return _download_response(
+    return await _download_response(
+        request,
         record,
         record.document_path,
         media_type=(
@@ -1809,11 +1946,15 @@ async def download_document(job_id: str) -> FileResponse:
 
 
 @app.get("/api/jobs/{job_id}/download")
-async def download_and_delete_document(job_id: str) -> FileResponse:
+async def download_and_delete_document(
+    job_id: str,
+    request: Request,
+) -> FileResponse:
     """Baixa o DOCX e agenda a exclusão após o envio da resposta."""
 
     record = _get_job(job_id.lower())
-    return _download_response(
+    return await _download_response(
+        request,
         record,
         record.document_path,
         media_type=(
@@ -1826,9 +1967,13 @@ async def download_and_delete_document(job_id: str) -> FileResponse:
 
 
 @app.get("/api/jobs/{job_id}/validation-report")
-async def download_validation_report(job_id: str) -> FileResponse:
+async def download_validation_report(
+    job_id: str,
+    request: Request,
+) -> FileResponse:
     record = _get_job(job_id.lower())
-    return _download_response(
+    return await _download_response(
+        request,
         record,
         record.validation_report_path,
         media_type="application/json",
@@ -1844,20 +1989,16 @@ async def delete_job(job_id: str) -> Response:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Execução não encontrada.",
         )
-    with JOBS_LOCK:
-        record = JOBS.get(normalized)
-    if record is not None and (
-        record.status in {"receiving", "validating", "generating"}
-        or record.active_downloads > 0
-    ):
+    outcome = _delete_job_data(normalized)
+    if outcome is JobDeletionOutcome.BUSY:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "code": "job_busy",
-                "message": "A execução ainda está sendo processada.",
+                "message": "A execução ainda está em processamento ou download.",
             },
         )
-    if not _delete_job_data(normalized):
+    if outcome is JobDeletionOutcome.RETRY:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={

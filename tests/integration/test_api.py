@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -640,6 +641,9 @@ def test_cors_allows_only_configured_github_pages_origin(
         allowed.headers["access-control-allow-origin"]
         == "https://kinhoog.github.io"
     )
+    exposed_headers = allowed.headers["access-control-expose-headers"].casefold()
+    assert "x-aep-content-length" in exposed_headers
+    assert "x-aep-content-sha256" in exposed_headers
     assert rejected.status_code == 403
     assert "access-control-allow-origin" not in rejected.headers
     assert missing.status_code == 403
@@ -684,6 +688,27 @@ def test_complete_document_download_then_explicit_idempotent_deletion(
     assert not job_dir.exists()
 
 
+def test_delete_returns_conflict_while_download_is_active(
+    api_client: TestClient,
+    validate_job: dict[str, Any],
+) -> None:
+    job_id = validate_job["job_id"]
+    record = web_app.JOBS[job_id]
+    record.active_downloads = 1
+
+    busy = api_client.delete(f"/api/jobs/{job_id}")
+
+    assert busy.status_code == 409
+    assert busy.json()["detail"]["code"] == "job_busy"
+    assert web_app.JOBS[job_id] is record
+    assert record.job_dir.is_dir()
+
+    record.active_downloads = 0
+    assert api_client.delete(f"/api/jobs/{job_id}").status_code == 204
+    assert job_id not in web_app.JOBS
+    assert not record.job_dir.exists()
+
+
 def test_download_endpoint_deletes_only_after_complete_response(
     api_client: TestClient,
     validate_job: dict[str, Any],
@@ -701,11 +726,26 @@ def test_download_endpoint_deletes_only_after_complete_response(
     assert completed["downloads"]["download"].endswith("/download")
     job_dir = web_app.JOBS[job_id].job_dir
 
+    partial = api_client.get(
+        completed["downloads"]["download"],
+        headers={"Range": "bytes=0-3"},
+    )
+
+    assert partial.status_code == 416
+    assert partial.json()["detail"]["code"] == "partial_download_not_supported"
+    assert job_id in web_app.JOBS
+    assert job_dir.is_dir()
+
     response = api_client.get(completed["downloads"]["download"])
 
     assert response.status_code == 200
     assert response.content.startswith(b"PK\x03\x04")
     assert int(response.headers["content-length"]) == len(response.content)
+    assert int(response.headers["x-aep-content-length"]) == len(response.content)
+    assert response.headers["x-aep-content-sha256"] == hashlib.sha256(
+        response.content
+    ).hexdigest()
+    assert response.headers["cache-control"] == "no-store, no-transform"
     with zipfile.ZipFile(io.BytesIO(response.content)) as package:
         assert package.testzip() is None
     assert job_id not in web_app.JOBS
@@ -721,6 +761,25 @@ def test_abandoned_validated_job_is_removed_by_ttl(
     record = web_app.JOBS[job_id]
     record.updated_at = time.time() - web_app.JOB_TTL_SECONDS - 1
 
+    assert web_app.cleanup_expired_jobs() == 1
+    assert job_id not in web_app.JOBS
+    assert not record.job_dir.exists()
+
+
+def test_ttl_cleanup_does_not_remove_an_active_download(
+    api_client: TestClient,
+    validate_job: dict[str, Any],
+) -> None:
+    job_id = validate_job["job_id"]
+    record = web_app.JOBS[job_id]
+    record.updated_at = time.time() - web_app.JOB_TTL_SECONDS - 1
+    record.active_downloads = 1
+
+    assert web_app.cleanup_expired_jobs() == 0
+    assert web_app.JOBS[job_id] is record
+    assert record.job_dir.is_dir()
+
+    record.active_downloads = 0
     assert web_app.cleanup_expired_jobs() == 1
     assert job_id not in web_app.JOBS
     assert not record.job_dir.exists()
