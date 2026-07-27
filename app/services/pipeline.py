@@ -50,6 +50,17 @@ from app.services.validation import validate_normalized_aep
 class PipelineError(RuntimeError):
     """Safe user-facing pipeline error without internal filesystem paths."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "pipeline_error",
+        field: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.field = field
+
 
 _OLE_SIGNATURE = bytes.fromhex("D0CF11E0A1B11AE1")
 
@@ -58,8 +69,7 @@ class CompatibilityProfileError(PipelineError):
     """Safe failure raised when the private pilot profile cannot be applied."""
 
     def __init__(self, message: str, *, code: str) -> None:
-        super().__init__(message)
-        self.code = code
+        super().__init__(message, code=code)
 
 
 _FILE_ALIASES: dict[str, tuple[str, ...]] = {
@@ -464,47 +474,144 @@ class DocumentPipeline:
         payload: Mapping[str, Any],
     ) -> NormalizedAEP:
         try:
-            ghe_result = extract_ghes(_first_file(files, "ghe"))
+            try:
+                ghe_result = extract_ghes(_first_file(files, "ghe"))
+            except Exception as exc:
+                raise PipelineError(
+                    "A planilha oficial dos GHEs não pôde ser lida. "
+                    "Confira se o arquivo correto foi colocado nesse campo.",
+                    code="ghe_spreadsheet_invalid",
+                    field="ghe_spreadsheet",
+                ) from exc
             ghes = ghe_result.ghes
-            ergo_path = _first_file(files, "ergo_raw")
-            assert ergo_path is not None
-            ergo = _extract_ergo_with_legacy_conversion(
-                ergo_path,
-                self.settings,
-            )
-            psychosocial = extract_psychosocial(
-                _first_file(files, "psychosocial_raw"), ghes
-            )
-            psychosocial = _split_positional_psychosocial(psychosocial, ghes)
-            mode = str(payload.get("analysis_mode", "integrated")).casefold()
-            if mode == AnalysisMode.SEPARATE.value:
-                technical = extract_technical_report(
-                    psychosocial_path=_first_file(
-                        files, "psychosocial_analysis"
-                    ),
-                    ergonomic_path=_first_file(files, "ergonomic_analysis"),
+            if not ghes:
+                raise PipelineError(
+                    "A planilha enviada não contém GHEs utilizáveis.",
+                    code="ghe_spreadsheet_empty",
+                    field="ghe_spreadsheet",
                 )
-            else:
-                technical = extract_technical_report(
-                    integrated_path=_first_file(files, "technical_integrated")
+
+            try:
+                ergo_path = _first_file(files, "ergo_raw")
+                assert ergo_path is not None
+                ergo = _extract_ergo_with_legacy_conversion(
+                    ergo_path,
+                    self.settings,
+                )
+            except Exception as exc:
+                raise PipelineError(
+                    "O relatório Ergo bruto não pôde ser lido. "
+                    "Confira se o arquivo correto foi colocado nesse campo.",
+                    code="ergo_report_invalid",
+                    field="ergo_report",
+                ) from exc
+            if not ergo.blocks:
+                raise PipelineError(
+                    "O relatório Ergo bruto não contém os blocos esperados.",
+                    code="ergo_report_empty",
+                    field="ergo_report",
+                )
+
+            try:
+                psychosocial = extract_psychosocial(
+                    _first_file(files, "psychosocial_raw"), ghes
+                )
+            except Exception as exc:
+                raise PipelineError(
+                    "O relatório psicossocial bruto não pôde ser lido. "
+                    "Confira se os relatórios DOCX não foram trocados.",
+                    code="psychosocial_report_invalid",
+                    field="psychosocial_report",
+                ) from exc
+            if not psychosocial.images:
+                raise PipelineError(
+                    "O relatório psicossocial bruto não contém os painéis "
+                    "e imagens esperados. Confira se os relatórios DOCX "
+                    "não foram trocados.",
+                    code="psychosocial_report_empty",
+                    field="psychosocial_report",
+                )
+            psychosocial = _split_positional_psychosocial(psychosocial, ghes)
+
+            mode = str(payload.get("analysis_mode", "integrated")).casefold()
+            technical_field = (
+                None
+                if mode == AnalysisMode.SEPARATE.value
+                else "integrated_report"
+            )
+            try:
+                if mode == AnalysisMode.SEPARATE.value:
+                    technical = extract_technical_report(
+                        psychosocial_path=_first_file(
+                            files, "psychosocial_analysis"
+                        ),
+                        ergonomic_path=_first_file(
+                            files, "ergonomic_analysis"
+                        ),
+                    )
+                else:
+                    technical = extract_technical_report(
+                        integrated_path=_first_file(
+                            files, "technical_integrated"
+                        )
+                    )
+            except Exception as exc:
+                raise PipelineError(
+                    "A análise técnica aprovada não pôde ser lida. "
+                    "Confira os arquivos selecionados para essa etapa.",
+                    code="technical_report_invalid",
+                    field=technical_field,
+                ) from exc
+            if not any(
+                (
+                    technical.sections,
+                    technical.analyses,
+                    technical.priorities,
+                    technical.action_plan,
+                    technical.conclusion,
+                )
+            ):
+                raise PipelineError(
+                    "A análise técnica enviada não contém os blocos "
+                    "aprovados esperados. Confira se os relatórios DOCX "
+                    "não foram trocados.",
+                    code="technical_report_empty",
+                    field=technical_field,
                 )
             technical = _merge_technical_analyses(technical)
-            card_path = _first_file(files, "cnpj_card")
+
+            try:
+                card_path = _first_file(files, "cnpj_card")
+                registration_card = _image_asset(
+                    card_path, "registration-card", ImageRole.OTHER
+                )
+            except Exception as exc:
+                raise PipelineError(
+                    "A imagem do cartão CNPJ não pôde ser lida.",
+                    code="cnpj_card_invalid",
+                    field="cnpj_card",
+                ) from exc
             logo_path = _first_file(files, "logo", required=False)
+            try:
+                company_logo = (
+                    _image_asset(logo_path, "company-logo", ImageRole.OTHER)
+                    if logo_path
+                    else None
+                )
+            except Exception as exc:
+                raise PipelineError(
+                    "A imagem da logo opcional não pôde ser lida.",
+                    code="company_logo_invalid",
+                    field="company_logo",
+                ) from exc
             company = CompanyData(
                 legal_name=str(
                     payload.get("legal_name")
                     or payload.get("company_name")
                     or ""
                 ).strip(),
-                registration_card=_image_asset(
-                    card_path, "registration-card", ImageRole.OTHER
-                ),
-                logo=(
-                    _image_asset(logo_path, "company-logo", ImageRole.OTHER)
-                    if logo_path
-                    else None
-                ),
+                registration_card=registration_card,
+                logo=company_logo,
             )
             source_ids = [block.source_id for block in ergo.blocks]
             compatibility = _compatibility(
@@ -552,7 +659,8 @@ class DocumentPipeline:
             raise
         except Exception as exc:
             raise PipelineError(
-                "Não foi possível extrair e normalizar todos os arquivos."
+                "Não foi possível organizar os dados extraídos dos arquivos.",
+                code="normalization_failed",
             ) from exc
 
     def validate(

@@ -48,9 +48,10 @@ from app.services.hosted_template import (
 )
 
 try:
-    from app.services.pipeline import DocumentPipeline
+    from app.services.pipeline import DocumentPipeline, PipelineError
 except ImportError:  # A API também pode ser importada durante o bootstrap.
     DocumentPipeline = None  # type: ignore[assignment,misc]
+    PipelineError = RuntimeError  # type: ignore[assignment,misc]
 
 PIPELINE_INSTANCE: Any | None = None
 PIPELINE_STARTUP_ERROR: str | None = None
@@ -1618,6 +1619,8 @@ async def validate_files(request: Request) -> JSONResponse:
         raise
     except RuntimeError as exc:
         _discard_pipeline_state(job_id)
+        error_fields: dict[str, str] = {}
+        error_field: str | None = None
         if str(exc) == "pipeline_unavailable":
             message = "O compilador ainda não está disponível nesta instalação."
             code = "pipeline_unavailable"
@@ -1634,6 +1637,13 @@ async def validate_files(request: Request) -> JSONResponse:
             message = str(exc)
             code = str(getattr(exc, "code"))
             http_status = status.HTTP_422_UNPROCESSABLE_CONTENT
+        elif isinstance(exc, PipelineError):
+            message = str(exc)
+            code = str(getattr(exc, "code", "pipeline_error"))
+            error_field = getattr(exc, "field", None)
+            if error_field:
+                error_fields[error_field] = message
+            http_status = status.HTTP_422_UNPROCESSABLE_CONTENT
         else:
             message = "A validação não pôde ser concluída."
             code = "validation_failed"
@@ -1645,12 +1655,19 @@ async def validate_files(request: Request) -> JSONResponse:
             progress=30,
             error_message=message,
         )
-        record.errors = [_public_error(message, code=code)]
+        record.errors = [
+            _public_error(message, code=code, field_name=error_field)
+        ]
         _write_validation_report(record)
         logger.error("Falha na validação job=%s tipo=%s", job_id, type(exc).__name__)
         raise HTTPException(
             status_code=http_status,
-            detail={"code": code, "message": message, "job_id": job_id},
+            detail={
+                "code": code,
+                "message": message,
+                "fields": error_fields,
+                "job_id": job_id,
+            },
         )
     except Exception as exc:
         _discard_pipeline_state(job_id)

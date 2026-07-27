@@ -172,6 +172,74 @@ def test_validation_exposes_unmatched_ergo_block_for_reconciliation(
     assert validate_job["warnings"]
 
 
+def test_validation_identifies_swapped_docx_reports(
+    api_client: TestClient,
+    valid_form_data: dict[str, str],
+    valid_uploads: dict[str, tuple[str, bytes, str]],
+) -> None:
+    swapped_uploads = dict(valid_uploads)
+    swapped_uploads["psychosocial_report"] = valid_uploads[
+        "integrated_report"
+    ]
+    swapped_uploads["integrated_report"] = valid_uploads[
+        "psychosocial_report"
+    ]
+
+    response = api_client.post(
+        "/api/validate",
+        data=valid_form_data,
+        files=swapped_uploads,
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "psychosocial_report_empty"
+    assert detail["fields"] == {
+        "psychosocial_report": detail["message"]
+    }
+    assert "não foram trocados" in detail["message"]
+    job_id = detail["job_id"]
+    report = api_client.get(
+        f"/api/jobs/{job_id}/validation-report"
+    ).json()
+    assert report["errors"] == [
+        {
+            "code": "psychosocial_report_empty",
+            "message": detail["message"],
+            "field": "psychosocial_report",
+        }
+    ]
+    assert api_client.delete(f"/api/jobs/{job_id}").status_code == 204
+
+
+def test_validation_identifies_wrong_integrated_report(
+    api_client: TestClient,
+    valid_form_data: dict[str, str],
+    valid_uploads: dict[str, tuple[str, bytes, str]],
+) -> None:
+    invalid_uploads = dict(valid_uploads)
+    invalid_uploads["integrated_report"] = valid_uploads[
+        "psychosocial_report"
+    ]
+
+    response = api_client.post(
+        "/api/validate",
+        data=valid_form_data,
+        files=invalid_uploads,
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "technical_report_empty"
+    assert detail["fields"] == {
+        "integrated_report": detail["message"]
+    }
+    assert "não foram trocados" in detail["message"]
+    assert api_client.delete(
+        f"/api/jobs/{detail['job_id']}"
+    ).status_code == 204
+
+
 def test_generation_poll_download_report_and_input_cleanup_without_logo(
     api_client: TestClient,
     validate_job: dict[str, Any],
@@ -741,7 +809,7 @@ def test_timeout_during_artifact_check_cannot_publish_document(
 
     def blocked_artifact_check(*args: Any, **kwargs: Any) -> None:
         artifact_check_started.set()
-        if not release_artifact_check.wait(timeout=5):
+        if not release_artifact_check.wait(timeout=30):
             raise RuntimeError("synthetic artifact release timed out")
         original_validate_real_type(*args, **kwargs)
 
