@@ -56,11 +56,14 @@ jobs:
           fs.writeFileSync("frontend/config.js", content, "utf8");
 
           const revision = (process.env.GITHUB_SHA || "local").slice(0, 12);
-          const indexPath = "frontend/index.html";
-          const index = fs
-            .readFileSync(indexPath, "utf8")
-            .replace(/\?v=0\.2\.0/g, `?v=${revision}`);
-          fs.writeFileSync(indexPath, index, "utf8");
+          for (const file of fs.readdirSync("frontend")) {
+            if (!file.endsWith(".html")) continue;
+            const htmlPath = `frontend/${file}`;
+            const html = fs
+              .readFileSync(htmlPath, "utf8")
+              .replace(/\?v=0\.3\.0/g, `?v=${revision}`);
+            fs.writeFileSync(htmlPath, html, "utf8");
+          }
           NODE
 
       - name: Configurar GitHub Pages

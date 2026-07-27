@@ -20,17 +20,43 @@ def _read(path: Path) -> str:
 
 def test_frontend_is_static_and_works_below_github_pages_subdirectory() -> None:
     index = _read(FRONTEND / "index.html")
+    guide = _read(FRONTEND / "como-funciona.html")
 
     assert (FRONTEND / "styles.css").is_file()
     assert (FRONTEND / "app.js").is_file()
     assert (FRONTEND / "config.js").is_file()
+    assert (FRONTEND / "como-funciona.html").is_file()
     assert (FRONTEND / "assets").is_dir()
     assert 'href="./styles.css' in index
     assert 'src="./config.js' in index
     assert 'src="./app.js' in index
+    assert 'href="./como-funciona.html"' in index
     assert 'href="./"' in index
-    assert not re.search(r"""(?:src|href)=["']/""", index)
-    assert "<base " not in index.lower()
+    assert 'href="./styles.css' in guide
+    assert 'href="./"' in guide
+    for page in (index, guide):
+        assert not re.search(r"""(?:src|href)=["']/""", page)
+        assert "<base " not in page.lower()
+
+
+def test_main_page_starts_with_the_form_and_guide_is_a_separate_page() -> None:
+    index = _read(FRONTEND / "index.html")
+    guide = _read(FRONTEND / "como-funciona.html")
+    guide_copy = " ".join(re.sub(r"<[^>]+>", " ", guide).casefold().split())
+
+    assert '<main id="conteudo">' in index
+    assert '<div class="shell workspace">' in index
+    assert '<section class="hero">' not in index
+    assert 'class="process-card"' not in index
+    assert "Etapas do processo" not in index
+    assert index.index('<div class="shell workspace">') < index.index('id="aep-form"')
+
+    assert "Como funciona" in guide
+    for stage in ("envie", "valide", "reconcilie", "gere"):
+        assert stage in guide_copy
+    assert "app.js" not in guide
+    assert "config.js" not in guide
+    assert "processamento temporário" in guide_copy
 
 
 def test_frontend_uses_configured_https_backend_without_fake_default() -> None:
@@ -208,7 +234,8 @@ function responseHeaders(values) {
 
 def test_public_page_contains_accurate_privacy_notice_and_no_local_setup_copy() -> None:
     index = _read(FRONTEND / "index.html")
-    visible_copy = re.sub(r"<[^>]+>", " ", index).casefold()
+    guide = _read(FRONTEND / "como-funciona.html")
+    visible_copy = re.sub(r"<[^>]+>", " ", index + guide).casefold()
 
     assert (
         "os arquivos são utilizados somente durante a geração do documento. "
@@ -264,6 +291,8 @@ def test_pages_workflow_builds_config_and_publishes_frontend() -> None:
     assert "actions/deploy-pages@v4" in workflow
     assert "AEP_API_BASE_URL: ${{ vars.AEP_API_BASE_URL }}" in workflow
     assert 'API_BASE_URL: ""' in workflow
+    assert 'fs.readdirSync("frontend")' in workflow
+    assert 'file.endsWith(".html")' in workflow
     assert "path: frontend" in workflow
     assert "name: github-pages" in workflow
     assert "url: ${{ steps.deployment.outputs.page_url }}" in workflow

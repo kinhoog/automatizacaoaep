@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Compile relatórios técnicos no modelo oficial da AEP, com validação e reconciliação de GHEs.">
     <title>Automatizador de Documentos AEP</title>
-    <link rel="stylesheet" href="./styles.css?v=0.2.0">
-    <script src="./config.js?v=0.2.0"></script>
-    <script src="./app.js?v=0.2.0" defer></script>
+    <link rel="stylesheet" href="./styles.css?v=0.3.0">
+    <script src="./config.js?v=0.3.0"></script>
+    <script src="./app.js?v=0.3.0" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#conteudo">Ir para o conteúdo</a>
@@ -26,50 +26,17 @@
             <small>Compilação segura de documentos</small>
           </span>
         </a>
-        <div class="processing-badge">
-          <span class="processing-badge__dot" aria-hidden="true"></span>
-          Processamento temporário
+        <div class="topbar__actions">
+          <a class="topbar__link" href="./como-funciona.html">Como funciona</a>
+          <div class="processing-badge">
+            <span class="processing-badge__dot" aria-hidden="true"></span>
+            Processamento temporário
+          </div>
         </div>
       </div>
     </header>
 
     <main id="conteudo">
-      <section class="hero">
-        <div class="shell hero__grid">
-          <div class="hero__copy">
-            <p class="eyebrow">Documento editável, rastreável e padronizado</p>
-            <h1>Transforme os relatórios aprovados em um AEP completo.</h1>
-            <p class="hero__lead">
-              Envie as fontes oficiais, valide os GHEs e revise qualquer
-              divergência antes de gerar o Word no modelo da AEP.
-            </p>
-            <div class="hero__assurances" aria-label="Características">
-              <span>
-                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7"></path></svg>
-                Armazenamento apenas temporário
-              </span>
-              <span>
-                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7"></path></svg>
-                Sem novas conclusões técnicas
-              </span>
-              <span>
-                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7"></path></svg>
-                Saída DOCX editável
-              </span>
-            </div>
-          </div>
-          <aside class="process-card" aria-label="Etapas do processo">
-            <p class="process-card__title">Como funciona</p>
-            <ol>
-              <li><span>1</span><div><strong>Envie</strong><small>Dados e fontes oficiais</small></div></li>
-              <li><span>2</span><div><strong>Valide</strong><small>Estrutura, conteúdo e GHEs</small></div></li>
-              <li><span>3</span><div><strong>Reconcilie</strong><small>Divergências sem correção silenciosa</small></div></li>
-              <li><span>4</span><div><strong>Gere</strong><small>Documento e relatório de auditoria</small></div></li>
-            </ol>
-          </aside>
-        </div>
-      </section>
-
       <div class="shell workspace">
         <nav class="stepper" aria-label="Progresso do formulário">
           <button class="stepper__item is-active" type="button" data-step-link="1" aria-current="step">
