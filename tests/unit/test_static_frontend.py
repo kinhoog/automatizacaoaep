@@ -20,40 +20,51 @@ def _read(path: Path) -> str:
 
 def test_frontend_is_static_and_works_below_github_pages_subdirectory() -> None:
     index = _read(FRONTEND / "index.html")
+    generator = _read(FRONTEND / "gerar.html")
     guide = _read(FRONTEND / "como-funciona.html")
 
     assert (FRONTEND / "styles.css").is_file()
     assert (FRONTEND / "app.js").is_file()
     assert (FRONTEND / "config.js").is_file()
+    assert (FRONTEND / "gerar.html").is_file()
     assert (FRONTEND / "como-funciona.html").is_file()
     assert (FRONTEND / "assets").is_dir()
     assert 'href="./styles.css' in index
-    assert 'src="./config.js' in index
-    assert 'src="./app.js' in index
+    assert 'src="./config.js' not in index
+    assert 'src="./app.js' not in index
+    assert 'href="./gerar.html"' in index
     assert 'href="./como-funciona.html"' in index
     assert 'href="./"' in index
+    assert 'src="./config.js' in generator
+    assert 'src="./app.js' in generator
+    assert 'href="./como-funciona.html"' in generator
     assert 'href="./styles.css' in guide
     assert 'href="./"' in guide
-    for page in (index, guide):
+    assert 'href="./gerar.html"' in guide
+    for page in (index, generator, guide):
         assert not re.search(r"""(?:src|href)=["']/""", page)
         assert "<base " not in page.lower()
 
 
-def test_main_page_uses_editorial_landing_with_form_and_separate_guide() -> None:
+def test_landing_generator_and_guide_are_separate_focused_pages() -> None:
     index = _read(FRONTEND / "index.html")
+    generator = _read(FRONTEND / "gerar.html")
     guide = _read(FRONTEND / "como-funciona.html")
     guide_copy = " ".join(re.sub(r"<[^>]+>", " ", guide).casefold().split())
 
-    assert '<body class="app-page">' in index
-    assert '<main id="conteudo" class="app-landing">' in index
-    assert '<div class="shell app-landing__grid">' in index
-    assert '<aside class="app-intro"' in index
-    assert "Menos montagem." in index
-    assert '<div class="workspace">' in index
-    assert '<section class="hero">' not in index
-    assert 'class="process-card"' not in index
-    assert "Etapas do processo" not in index
-    assert index.index('<div class="workspace">') < index.index('id="aep-form"')
+    assert '<body class="landing-page">' in index
+    assert '<main id="conteudo" class="minimal-landing">' in index
+    assert "Dos relatórios aprovados" in index
+    assert 'href="./gerar.html"' in index
+    assert 'id="aep-form"' not in index
+    assert 'class="stepper"' not in index
+
+    assert '<body class="workspace-page">' in generator
+    assert '<main id="conteudo" class="document-workspace">' in generator
+    assert 'id="aep-form"' in generator
+    assert 'class="stepper"' in generator
+    assert 'class="app-intro"' not in generator
+    assert "Menos montagem." not in generator
 
     assert "Como funciona" in guide
     for stage in ("envie", "valide", "reconcilie", "gere"):
@@ -240,8 +251,9 @@ function responseHeaders(values) {
 
 def test_public_page_contains_accurate_privacy_notice_and_no_local_setup_copy() -> None:
     index = _read(FRONTEND / "index.html")
+    generator = _read(FRONTEND / "gerar.html")
     guide = _read(FRONTEND / "como-funciona.html")
-    visible_copy = re.sub(r"<[^>]+>", " ", index + guide).casefold()
+    visible_copy = re.sub(r"<[^>]+>", " ", index + generator + guide).casefold()
 
     assert (
         "os arquivos são utilizados somente durante a geração do documento. "
