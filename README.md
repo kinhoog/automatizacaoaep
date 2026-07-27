@@ -189,6 +189,7 @@ O fluxo usa as ações oficiais `configure-pages`, `upload-pages-artifact` e `de
 
 O arquivo [`render.yaml`](render.yaml) descreve um único Web Service Docker. O container:
 
+- usa inicialmente o plano gratuito do Render, sem exigir cartão;
 - escuta em `0.0.0.0` e usa `PORT`;
 - inclui Python, LibreOffice headless e fontes compatíveis;
 - executa com usuário não root;
@@ -198,6 +199,8 @@ O arquivo [`render.yaml`](render.yaml) descreve um único Web Service Docker. O 
 - define TTL inicial de 900 segundos.
 
 Crie o serviço como um [Render Blueprint](https://render.com/docs/infrastructure-as-code) apontando para este repositório. O armazenamento local padrão do serviço é efêmero; não adicione Persistent Disk. Consulte também [Web Services](https://render.com/docs/web-services), [Docker no Render](https://render.com/docs/docker) e [sistema de arquivos efêmero](https://render.com/docs/disks).
+
+No plano gratuito, o serviço pode hibernar após 15 minutos sem tráfego e levar cerca de um minuto para responder à primeira chamada seguinte. Esse comportamento é aceitável para o piloto; uma mudança futura para instância paga é uma decisão operacional e financeira separada.
 
 O template não entra no Git nem na imagem. Prepare os três arquivos Base64 privados:
 

@@ -67,10 +67,11 @@ O conjunto privado medido atualmente ocupa **918.504 bytes em Base64**, abaixo d
 3. selecione a branch `main`;
 4. permita que o Render leia `render.yaml`;
 5. revise o serviço `automatizador-aep-api`;
-6. não adicione banco de dados;
-7. não adicione Persistent Disk;
-8. mantenha uma única instância, pois os jobs e metadados ficam em memória e não há armazenamento compartilhado;
-9. crie o serviço.
+6. confirme o plano gratuito definido por `plan: free`; não cadastre cartão para o piloto;
+7. não adicione banco de dados;
+8. não adicione Persistent Disk;
+9. mantenha uma única instância, pois os jobs e metadados ficam em memória e não há armazenamento compartilhado;
+10. crie o serviço.
 
 Depois da criação, abra o serviço e cadastre os três **Secret Files**, usando exatamente os nomes da tabela. Cole em cada um apenas o conteúdo Base64 do arquivo correspondente.
 
@@ -193,6 +194,7 @@ Para atualizar:
 
 - não há login nem autenticação;
 - não há fila distribuída;
+- no plano gratuito, o serviço hiberna após um período sem tráfego e a primeira chamada pode levar cerca de um minuto;
 - o estado dos jobs fica em memória;
 - o serviço deve permanecer com uma instância;
 - reinicializações e deploys podem interromper trabalhos ativos;
