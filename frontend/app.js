@@ -24,12 +24,25 @@
   const compatibilityMode = document.querySelector("#compatibility-mode");
   const cleanupStatus = document.querySelector("#cleanup-status");
 
+  const REQUEST_TIMEOUT_MS = Object.freeze({
+    default: 45_000,
+    validation: 180_000,
+    generationStart: 60_000,
+    polling: 15_000,
+    download: 180_000,
+    cleanup: 15_000,
+    warmup: 75_000,
+  });
+  const MAX_POLL_FAILURES = 5;
+
   const state = {
     step: 1,
     jobId: null,
     validation: null,
     pollTimer: null,
     pollStartedAt: null,
+    pollFailures: 0,
+    pollEpoch: 0,
     uploadCount: 0,
     downloadInProgress: false,
     downloads: {
@@ -84,20 +97,43 @@
 
   const apiBaseUrl = configuredApiBaseUrl();
 
-  async function apiFetch(path, options = {}) {
+  async function apiFetch(
+    path,
+    options = {},
+    timeoutMs = REQUEST_TIMEOUT_MS.default,
+  ) {
     if (!apiBaseUrl) {
       throw new ApiError(
         "O serviço de processamento ainda não foi configurado para esta página.",
       );
     }
     const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-    return fetch(`${apiBaseUrl}${normalizedPath}`, {
-      mode: "cors",
-      credentials: "omit",
-      cache: "no-store",
-      referrerPolicy: "no-referrer",
-      ...options,
-    });
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(
+      () => controller.abort(),
+      Math.max(1, timeoutMs),
+    );
+    try {
+      return await fetch(`${apiBaseUrl}${normalizedPath}`, {
+        mode: "cors",
+        credentials: "omit",
+        cache: "no-store",
+        referrerPolicy: "no-referrer",
+        ...options,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        throw new ApiError(
+          "O serviço demorou mais que o esperado para responder.",
+          {},
+          408,
+        );
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
   }
 
   async function deleteJob(jobId) {
@@ -109,6 +145,7 @@
           method: "DELETE",
           headers: { Accept: "application/json" },
         },
+        REQUEST_TIMEOUT_MS.cleanup,
       );
       return response.ok || response.status === 404;
     } catch {
@@ -226,13 +263,9 @@
   function invalidateValidation() {
     if (!state.jobId && !state.validation) return;
     const obsoleteJobId = state.jobId;
-    if (state.pollTimer) {
-      window.clearTimeout(state.pollTimer);
-    }
+    cancelPolling();
     state.jobId = null;
     state.validation = null;
-    state.pollTimer = null;
-    state.pollStartedAt = null;
     state.uploadCount = 0;
     state.downloads.document = false;
     state.downloads.validationReport = false;
@@ -908,23 +941,58 @@
     return decisions;
   }
 
-  async function pollJob() {
-    if (!state.jobId) return;
+  function isCurrentPoll(epoch, jobId) {
+    return epoch === state.pollEpoch && jobId === state.jobId;
+  }
+
+  function cancelPolling() {
+    if (state.pollTimer) {
+      window.clearTimeout(state.pollTimer);
+    }
+    state.pollEpoch += 1;
+    state.pollTimer = null;
+    state.pollStartedAt = null;
+    state.pollFailures = 0;
+  }
+
+  function schedulePoll(epoch, jobId, delay) {
+    if (!isCurrentPoll(epoch, jobId)) return;
+    state.pollTimer = window.setTimeout(() => {
+      if (!isCurrentPoll(epoch, jobId)) return;
+      state.pollTimer = null;
+      void pollJob(epoch, jobId);
+    }, delay);
+  }
+
+  function stopPolling(message, epoch, jobId) {
+    if (!isCurrentPoll(epoch, jobId)) return;
+    cancelPolling();
+    setStep(3);
+    showError(message);
+  }
+
+  async function pollJob(epoch, jobId) {
+    if (!isCurrentPoll(epoch, jobId)) return;
     if (Date.now() - state.pollStartedAt > 12 * 60 * 1000) {
-      showError(
-        "O processamento está demorando mais que o esperado. Consulte novamente o status da execução.",
+      stopPolling(
+        "A geração ultrapassou o tempo máximo de acompanhamento. "
+          + "O carregamento foi interrompido para não ficar em repetição infinita.",
+        epoch,
+        jobId,
       );
       return;
     }
 
     try {
-      const response = await apiFetch(`/api/jobs/${encodeURIComponent(state.jobId)}`, {
+      const response = await apiFetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
         headers: { Accept: "application/json" },
-      });
+      }, REQUEST_TIMEOUT_MS.polling);
       const snapshot = await parseResponse(response);
+      if (!isCurrentPoll(epoch, jobId)) return;
+      state.pollFailures = 0;
       updateProgress(snapshot);
       if (snapshot.status === "completed") {
-        state.pollTimer = null;
+        cancelPolling();
         showCompleted(snapshot);
         return;
       }
@@ -932,21 +1000,88 @@
         snapshot.status === "failed" ||
         snapshot.status === "validation_failed"
       ) {
-        state.pollTimer = null;
+        cancelPolling();
         setStep(3);
-        showError(snapshot.error || "Não foi possível gerar o documento.");
+        showError(
+          snapshot.error
+            || snapshot.errors?.[0]?.message
+            || "Não foi possível gerar o documento.",
+        );
         return;
       }
-      state.pollTimer = window.setTimeout(pollJob, 750);
+      schedulePoll(epoch, jobId, 750);
     } catch (error) {
-      state.pollTimer = window.setTimeout(pollJob, 1600);
+      if (!isCurrentPoll(epoch, jobId)) return;
       if (error instanceof ApiError && error.status === 404) {
-        window.clearTimeout(state.pollTimer);
-        state.pollTimer = null;
-        setStep(3);
-        showError("A execução expirou. Valide os arquivos novamente.");
+        stopPolling(
+          "A execução expirou. Valide os arquivos novamente.",
+          epoch,
+          jobId,
+        );
+        return;
       }
+      state.pollFailures += 1;
+      if (state.pollFailures >= MAX_POLL_FAILURES) {
+        stopPolling(
+          "A conexão com a geração foi interrompida repetidamente. "
+            + "O sistema parou de tentar automaticamente para evitar um carregamento infinito.",
+          epoch,
+          jobId,
+        );
+        return;
+      }
+      const retryDelay = Math.min(
+        8_000,
+        1_200 * (2 ** (state.pollFailures - 1)),
+      );
+      schedulePoll(epoch, jobId, retryDelay);
     }
+  }
+
+  function startPolling(snapshot, jobId = state.jobId) {
+    if (!jobId || jobId !== state.jobId) return false;
+    cancelPolling();
+    const epoch = state.pollEpoch;
+    state.pollStartedAt = Date.now();
+    showProcessing(snapshot);
+    schedulePoll(epoch, jobId, 500);
+    return true;
+  }
+
+  async function recoverGenerationAfterStartFailure(jobId) {
+    if (!jobId || jobId !== state.jobId) return true;
+    try {
+      const response = await apiFetch(
+        `/api/jobs/${encodeURIComponent(jobId)}`,
+        { headers: { Accept: "application/json" } },
+        REQUEST_TIMEOUT_MS.polling,
+      );
+      const snapshot = await parseResponse(response);
+      if (jobId !== state.jobId) return true;
+      if (snapshot.status === "completed") {
+        cancelPolling();
+        showCompleted(snapshot);
+        return true;
+      }
+      if (snapshot.status === "generating") {
+        return startPolling(snapshot, jobId);
+      }
+      if (
+        snapshot.status === "failed"
+        || snapshot.status === "validation_failed"
+      ) {
+        setStep(3);
+        showError(
+          snapshot.error
+            || snapshot.errors?.[0]?.message
+            || "Não foi possível gerar o documento.",
+        );
+        return true;
+      }
+    } catch {
+      return false;
+    }
+    return false;
   }
 
   function showCompleted(snapshot) {
@@ -964,7 +1099,7 @@
   async function receiveArtifact(path, filename, kind) {
     const response = await apiFetch(path, {
       headers: { Accept: "application/octet-stream" },
-    });
+    }, REQUEST_TIMEOUT_MS.download);
     if (!response.ok) {
       await parseResponse(response);
     }
@@ -1166,7 +1301,7 @@
         method: "POST",
         body: payload,
         headers: { Accept: "application/json" },
-      });
+      }, REQUEST_TIMEOUT_MS.validation);
       const snapshot = await parseResponse(response);
       renderValidation(snapshot);
     } catch (error) {
@@ -1198,16 +1333,27 @@
           reconciliations,
           compatibility_mode: compatibilityMode.checked,
         }),
-      });
+      }, REQUEST_TIMEOUT_MS.generationStart);
       const snapshot = await parseResponse(response);
       if (snapshot.status === "completed") {
         showCompleted(snapshot);
         return;
       }
-      showProcessing(snapshot);
-      state.pollStartedAt = Date.now();
-      state.pollTimer = window.setTimeout(pollJob, 500);
+      startPolling(snapshot);
     } catch (error) {
+      const jobId = state.jobId;
+      const mayHaveStarted =
+        Boolean(jobId)
+        && (
+          !(error instanceof ApiError)
+          || error.status === 408
+        );
+      if (
+        mayHaveStarted
+        && await recoverGenerationAfterStartFailure(jobId)
+      ) {
+        return;
+      }
       if (error instanceof ApiError) {
         showError(error.message, error.fields);
       } else {
@@ -1224,13 +1370,9 @@
 
   document.querySelector("#new-document-button").addEventListener("click", () => {
     const completedJobId = state.jobId;
-    if (state.pollTimer) {
-      window.clearTimeout(state.pollTimer);
-    }
+    cancelPolling();
     state.jobId = null;
     state.validation = null;
-    state.pollTimer = null;
-    state.pollStartedAt = null;
     state.uploadCount = 0;
     state.downloads.document = false;
     state.downloads.validationReport = false;
@@ -1278,5 +1420,13 @@
     showError(
       "O endereço do serviço de processamento ainda não foi configurado para esta página.",
     );
+  } else {
+    void apiFetch(
+      "/api/health",
+      { headers: { Accept: "application/json" } },
+      REQUEST_TIMEOUT_MS.warmup,
+    ).catch(() => {
+      // A validação apresentará uma mensagem visível se o serviço continuar indisponível.
+    });
   }
 })();

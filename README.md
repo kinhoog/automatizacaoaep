@@ -146,6 +146,7 @@ Principais variáveis locais:
 | `AEP_MAX_REQUEST_MB` | `250` | Limite total da requisição |
 | `AEP_RUNTIME_DIR` | `uploads` no `.env.example` | Raiz transitória dos jobs |
 | `AEP_JOB_TTL_SECONDS` | `900` | Expiração de jobs abandonados |
+| `AEP_GENERATION_STALE_SECONDS` | `600` | Encerra jobs de geração sem progresso |
 | `AEP_TEMPLATE_PATH` | `private_templates/aep_template.docx` | Template saneado |
 | `AEP_TEMPLATE_MANIFEST_PATH` | `private_templates/aep_template.manifest.json` | Manifesto validado |
 | `AEP_COMPATIBILITY_PROFILE_PATH` | arquivo privado | Perfil opcional |

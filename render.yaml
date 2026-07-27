@@ -25,6 +25,8 @@ services:
         value: "900"
       - key: AEP_JOB_TTL_MINUTES
         value: "15"
+      - key: AEP_GENERATION_STALE_SECONDS
+        value: "600"
       - key: AEP_TEMPLATE_PATH
         value: /tmp/aep-runtime/template/aep_template.docx
       - key: AEP_TEMPLATE_MANIFEST_PATH

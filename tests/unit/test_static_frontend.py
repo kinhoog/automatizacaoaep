@@ -90,6 +90,206 @@ def test_frontend_uses_configured_https_backend_without_fake_default() -> None:
     assert "backend.onrender.com" not in (config + app)
 
 
+def test_frontend_aborts_hung_requests_and_stops_repeated_poll_failures() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js não está disponível para testar timeout do frontend.")
+
+    app_path = FRONTEND / "app.js"
+    app = _read(app_path)
+    assert "const MAX_POLL_FAILURES = 5" in app
+    assert "function stopPolling(message, epoch, jobId)" in app
+    assert "state.pollFailures >= MAX_POLL_FAILURES" in app
+    assert "para evitar um carregamento infinito" in app
+
+    script = r"""
+const fs = require("fs");
+global.window = {
+  AEP_CONFIG: { API_BASE_URL: "https://api.example.test" },
+  setTimeout,
+  clearTimeout,
+};
+global.fetch = (_url, options) =>
+  new Promise((_resolve, reject) => {
+    options.signal.addEventListener("abort", () => {
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      reject(error);
+    });
+  });
+
+const source = fs.readFileSync(process.argv[1], "utf8");
+const start = source.indexOf("const REQUEST_TIMEOUT_MS");
+const end = source.indexOf("async function deleteJob");
+if (start < 0 || end <= start) throw new Error("Helpers de timeout ausentes.");
+eval(
+  source.slice(start, end) +
+    ";globalThis.apiFetch = apiFetch;globalThis.ApiError = ApiError;",
+);
+
+(async () => {
+  const started = Date.now();
+  let observed;
+  try {
+    await globalThis.apiFetch("/api/test", {}, 15);
+  } catch (error) {
+    observed = error;
+  }
+  if (!(observed instanceof globalThis.ApiError)) {
+    throw new Error("Timeout não produziu ApiError.");
+  }
+  if (observed.status !== 408) throw new Error("Status de timeout incorreto.");
+  if (Date.now() - started > 500) throw new Error("Abort demorou demais.");
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+"""
+    completed = subprocess.run(
+        [node, "-e", script, str(app_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=5,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_frontend_ignores_stale_poll_and_recovers_lost_generate_response() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js não está disponível para testar o polling frontend.")
+
+    app_path = FRONTEND / "app.js"
+    app = _read(app_path)
+    assert "function isCurrentPoll(epoch, jobId)" in app
+    assert "async function pollJob(epoch, jobId)" in app
+    assert "await recoverGenerationAfterStartFailure(jobId)" in app
+
+    script = r"""
+const fs = require("fs");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const start = source.indexOf("function isCurrentPoll");
+const end = source.indexOf("function showCompleted");
+if (start < 0 || end <= start) throw new Error("Helpers de polling ausentes.");
+
+const REQUEST_TIMEOUT_MS = { polling: 15 };
+const MAX_POLL_FAILURES = 5;
+class ApiError extends Error {
+  constructor(message, fields = {}, status = 0) {
+    super(message);
+    this.fields = fields;
+    this.status = status;
+  }
+}
+const state = {
+  jobId: "job-antigo",
+  pollEpoch: 7,
+  pollTimer: null,
+  pollStartedAt: Date.now(),
+  pollFailures: 0,
+};
+let fetchImplementation;
+async function apiFetch(...args) {
+  return fetchImplementation(...args);
+}
+async function parseResponse(response) {
+  return response;
+}
+let scheduled = [];
+const window = {
+  setTimeout(callback, delay) {
+    scheduled.push({ callback, delay });
+    return scheduled.length;
+  },
+  clearTimeout() {},
+};
+let progressUpdates = 0;
+let processingSnapshots = [];
+let completedSnapshots = [];
+function updateProgress() {
+  progressUpdates += 1;
+}
+function showProcessing(snapshot) {
+  processingSnapshots.push(snapshot);
+}
+function showCompleted(snapshot) {
+  completedSnapshots.push(snapshot);
+}
+function setStep() {}
+function showError() {}
+
+eval(
+  source.slice(start, end)
+    + ";globalThis.pollJob = pollJob;"
+    + "globalThis.recoverGenerationAfterStartFailure = "
+    + "recoverGenerationAfterStartFailure;",
+);
+
+(async () => {
+  let releaseOldFetch;
+  fetchImplementation = () =>
+    new Promise((resolve) => {
+      releaseOldFetch = resolve;
+    });
+  const oldPoll = globalThis.pollJob(7, "job-antigo");
+  await Promise.resolve();
+  state.pollEpoch = 8;
+  state.jobId = "job-novo";
+  releaseOldFetch({
+    status: "generating",
+    progress: 70,
+    stage: "resposta obsoleta",
+  });
+  await oldPoll;
+  if (progressUpdates !== 0) {
+    throw new Error("Polling obsoleto atualizou o progresso.");
+  }
+  if (scheduled.length !== 0) {
+    throw new Error("Polling obsoleto reagendou uma nova consulta.");
+  }
+
+  state.jobId = "job-recuperado";
+  state.pollTimer = null;
+  state.pollStartedAt = null;
+  state.pollFailures = 0;
+  scheduled = [];
+  fetchImplementation = async () => ({
+    status: "generating",
+    progress: 60,
+    stage: "geração recuperada",
+  });
+  const recovered =
+    await globalThis.recoverGenerationAfterStartFailure("job-recuperado");
+  if (!recovered) throw new Error("Geração aceita não foi recuperada.");
+  if (processingSnapshots.length !== 1) {
+    throw new Error("Tela de processamento não foi restaurada.");
+  }
+  if (scheduled.length !== 1 || scheduled[0].delay !== 500) {
+    throw new Error("Polling recuperado não foi agendado corretamente.");
+  }
+  if (completedSnapshots.length !== 0) {
+    throw new Error("Geração em andamento foi tratada como concluída.");
+  }
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+"""
+    completed = subprocess.run(
+        [node, "-e", script, str(app_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=5,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_frontend_downloads_blob_then_requests_explicit_job_deletion() -> None:
     app = _read(FRONTEND / "app.js")
 

@@ -72,6 +72,9 @@ MAX_REQUEST_SIZE = max(
 MAX_FORM_FIELDS = 16
 MAX_TEXT_PART_SIZE = 16 * 1024
 JOB_TTL_SECONDS = default_settings.job_ttl_seconds
+GENERATION_STALE_SECONDS = max(
+    60, int(os.getenv("AEP_GENERATION_STALE_SECONDS", "600"))
+)
 ALLOWED_ORIGINS = default_settings.allowed_origins
 REQUIRE_ORIGIN = default_settings.require_origin
 JOB_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
@@ -256,6 +259,9 @@ class JobRecord:
     validation_report_path: Path | None = None
     error_message: str | None = None
     active_downloads: int = 0
+    generation_token: str | None = None
+    generation_worker_active: bool = False
+    generation_timed_out: bool = False
 
     def touch(self) -> None:
         self.updated_at = time.time()
@@ -620,6 +626,31 @@ def _set_job_state(
         record.progress = max(0, min(100, progress))
         record.error_message = error_message
         record.touch()
+
+
+def _set_generation_state(
+    record: JobRecord,
+    token: str,
+    *,
+    stage: str,
+    progress: int,
+) -> bool:
+    """Atualiza um worker somente enquanto ele ainda possui o job."""
+
+    with JOBS_LOCK:
+        if (
+            JOBS.get(record.job_id) is not record
+            or record.generation_token != token
+            or not record.generation_worker_active
+            or record.generation_timed_out
+            or record.status != "generating"
+        ):
+            return False
+        record.stage = stage
+        record.progress = max(0, min(100, progress))
+        record.error_message = None
+        record.touch()
+        return True
 
 
 def _message_list(value: Any, default_level: str) -> list[dict[str, Any]]:
@@ -1060,27 +1091,37 @@ def _write_validation_report(record: JobRecord) -> Path:
     report_path = (record.job_dir / "validation-report.json").resolve()
     if not _is_within(report_path, record.job_dir):
         raise RuntimeError("unsafe report path")
-    report = {
-        "schema_version": "1.0",
-        "job_id": record.job_id,
-        "generated_at": _utc_iso(time.time()),
-        "status": record.status,
-        "document": {
-            "competence": record.fields.get("competence"),
-            "analysis_mode": record.fields.get("analysis_mode"),
-            "compatibility_mode": record.compatibility is not None,
-        },
-        "summary": record.validation.get("summary", {}),
-        "warnings": record.warnings,
-        "errors": record.errors,
-        "reconciliation": record.reconciliation,
-        "compatibility": record.compatibility,
-    }
-    report_path.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    with JOBS_LOCK:
+        serialized = json.dumps(
+            {
+                "schema_version": "1.0",
+                "job_id": record.job_id,
+                "generated_at": _utc_iso(time.time()),
+                "status": record.status,
+                "document": {
+                    "competence": record.fields.get("competence"),
+                    "analysis_mode": record.fields.get("analysis_mode"),
+                    "compatibility_mode": record.compatibility is not None,
+                },
+                "summary": record.validation.get("summary", {}),
+                "warnings": record.warnings,
+                "errors": record.errors,
+                "reconciliation": record.reconciliation,
+                "compatibility": record.compatibility,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    temporary_path = report_path.with_name(
+        f".{report_path.name}.{secrets.token_hex(8)}.tmp"
     )
-    record.validation_report_path = report_path
+    try:
+        temporary_path.write_text(serialized, encoding="utf-8")
+        os.replace(temporary_path, report_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    with JOBS_LOCK:
+        record.validation_report_path = report_path
     return report_path
 
 
@@ -1173,6 +1214,7 @@ def _delete_job_data(job_id: str) -> JobDeletionOutcome:
                 record is not None
                 and (
                     record.status in {"receiving", "validating", "generating"}
+                    or record.generation_worker_active
                     or record.active_downloads > 0
                 )
             )
@@ -1229,16 +1271,54 @@ def _cleanup_orphan_runtime_dirs(timestamp: float) -> int:
     return removed
 
 
+def _fail_stalled_generations(timestamp: float) -> int:
+    """Transforma uma geração sem progresso em falha terminal auditável."""
+
+    stalled: list[JobRecord] = []
+    with JOBS_LOCK:
+        for record in JOBS.values():
+            if (
+                record.status != "generating"
+                or timestamp - record.updated_at < GENERATION_STALE_SECONDS
+            ):
+                continue
+            message = (
+                "A geração excedeu o tempo máximo de processamento. "
+                "Valide os arquivos e tente novamente."
+            )
+            record.status = "failed"
+            record.stage = "Tempo limite da geração excedido"
+            record.progress = max(55, record.progress)
+            record.error_message = message
+            record.generation_timed_out = True
+            if not any(
+                item.get("code") == "generation_timeout"
+                for item in record.errors
+            ):
+                record.errors.append(
+                    _public_error(message, code="generation_timeout")
+                )
+            record.updated_at = timestamp
+            stalled.append(record)
+
+    for record in stalled:
+        _write_validation_report(record)
+        logger.error("Tempo limite da geração excedido job=%s", record.job_id)
+    return len(stalled)
+
+
 def cleanup_expired_jobs(now: float | None = None) -> int:
     """Remove jobs expirados sem aceitar caminhos externos ao runtime."""
 
     timestamp = now if now is not None else time.time()
+    _fail_stalled_generations(timestamp)
     with JOBS_LOCK:
         expired = [
             record
             for record in JOBS.values()
             if timestamp - record.updated_at >= JOB_TTL_SECONDS
             and record.status not in {"receiving", "validating", "generating"}
+            and not record.generation_worker_active
             and record.active_downloads == 0
         ]
 
@@ -1600,45 +1680,58 @@ async def validate_files(request: Request) -> JSONResponse:
 async def _execute_generation(
     record: JobRecord,
     reconciliation: Any,
+    token: str,
 ) -> None:
     try:
-        _set_job_state(
+        if not _set_generation_state(
             record,
-            job_status="generating",
+            token,
             stage="Aplicando reconciliação dos GHEs",
             progress=60,
-        )
+        ):
+            return
         raw_result = await _invoke_pipeline(
             record,
             ("generate", "assemble", "run_generation"),
             reconciliation=reconciliation,
         )
+        if not _set_generation_state(
+            record,
+            token,
+            stage="Conferindo o documento gerado",
+            progress=85,
+        ):
+            logger.warning(
+                "Resultado tardio descartado job=%s status=%s",
+                record.job_id,
+                record.status,
+            )
+            return
+
         public_result = _jsonable(raw_result)
+        generated_reconciliation: dict[str, Any] | None = None
+        generated_compatibility: dict[str, Any] | None = None
+        compatibility_was_returned = False
+        generated_warnings: list[dict[str, Any]] | None = None
+        generated_errors: list[dict[str, Any]] | None = None
         if isinstance(public_result, Mapping):
-            generated_reconciliation = public_result.get("reconciliation")
-            if isinstance(generated_reconciliation, Mapping):
-                record.reconciliation = dict(generated_reconciliation)
+            reconciliation_value = public_result.get("reconciliation")
+            if isinstance(reconciliation_value, Mapping):
+                generated_reconciliation = dict(reconciliation_value)
             if "compatibility" in public_result:
-                generated_compatibility = public_result.get("compatibility")
-                record.compatibility = (
-                    dict(generated_compatibility)
-                    if isinstance(generated_compatibility, Mapping)
+                compatibility_was_returned = True
+                compatibility_value = public_result.get("compatibility")
+                generated_compatibility = (
+                    dict(compatibility_value)
+                    if isinstance(compatibility_value, Mapping)
                     else None
                 )
-            generated_warnings = public_result.get("warnings")
-            if generated_warnings is not None:
-                record.warnings = _message_list(
-                    generated_warnings, "warning"
-                )
-            generated_errors = public_result.get("errors")
-            if generated_errors is not None:
-                record.errors = _message_list(generated_errors, "error")
-        _set_job_state(
-            record,
-            job_status="generating",
-            stage="Finalizando documento editável",
-            progress=90,
-        )
+            warnings_value = public_result.get("warnings")
+            if warnings_value is not None:
+                generated_warnings = _message_list(warnings_value, "warning")
+            errors_value = public_result.get("errors")
+            if errors_value is not None:
+                generated_errors = _message_list(errors_value, "error")
 
         document_bytes = _extract_artifact_bytes(
             raw_result, ("document_bytes", "docx_bytes")
@@ -1646,16 +1739,16 @@ async def _execute_generation(
         if document_bytes is not None:
             target = record.job_dir / "documento-aep.docx"
             target.write_bytes(document_bytes)
-            record.document_path = target.resolve()
+            document_path = target.resolve()
         else:
-            record.document_path = _extract_artifact_path(
+            document_path = _extract_artifact_path(
                 raw_result,
                 ("document_path", "docx_path", "output_path", "document"),
                 record,
             )
-        if record.document_path is None:
+        if document_path is None:
             raise RuntimeError("document_not_produced")
-        _validate_real_type(record.document_path, ".docx", "document")
+        _validate_real_type(document_path, ".docx", "document")
 
         report_path = _extract_artifact_path(
             raw_result,
@@ -1666,17 +1759,42 @@ async def _execute_generation(
             ),
             record,
         )
-        if report_path is not None and report_path.suffix.lower() == ".json":
-            record.validation_report_path = report_path
-        else:
-            _write_validation_report(record)
+        if report_path is not None and report_path.suffix.lower() != ".json":
+            report_path = None
 
-        _set_job_state(
-            record,
-            job_status="completed",
-            stage="Documento AEP pronto",
-            progress=100,
-        )
+        with JOBS_LOCK:
+            can_commit = (
+                JOBS.get(record.job_id) is record
+                and record.generation_token == token
+                and record.generation_worker_active
+                and not record.generation_timed_out
+                and record.status == "generating"
+            )
+            if can_commit:
+                if generated_reconciliation is not None:
+                    record.reconciliation = generated_reconciliation
+                if compatibility_was_returned:
+                    record.compatibility = generated_compatibility
+                if generated_warnings is not None:
+                    record.warnings = generated_warnings
+                if generated_errors is not None:
+                    record.errors = generated_errors
+                record.document_path = document_path
+                if report_path is not None:
+                    record.validation_report_path = report_path
+                record.status = "completed"
+                record.stage = "Documento AEP pronto"
+                record.progress = 100
+                record.error_message = None
+                record.touch()
+
+        if not can_commit:
+            logger.warning(
+                "Conclusão tardia descartada job=%s status=%s",
+                record.job_id,
+                record.status,
+            )
+            return
         _write_validation_report(record)
     except Exception as exc:
         if isinstance(exc, RuntimeError) and str(exc) == "pipeline_unavailable":
@@ -1688,21 +1806,49 @@ async def _execute_generation(
             message = "A etapa de geração não está configurada."
         else:
             message = "Não foi possível gerar o documento. Revise a validação."
-        _set_job_state(
-            record,
-            job_status="failed",
-            stage="Falha na geração",
-            progress=max(55, record.progress),
-            error_message=message,
-        )
-        record.errors.append(_public_error(message, code="generation_failed"))
-        _write_validation_report(record)
-        logger.error(
-            "Falha na geração job=%s tipo=%s",
-            record.job_id,
-            type(exc).__name__,
-        )
+
+        with JOBS_LOCK:
+            can_fail = (
+                JOBS.get(record.job_id) is record
+                and record.generation_token == token
+                and record.generation_worker_active
+                and not record.generation_timed_out
+                and record.status == "generating"
+            )
+            if can_fail:
+                record.status = "failed"
+                record.stage = "Falha na geração"
+                record.progress = max(55, record.progress)
+                record.error_message = message
+                record.errors.append(
+                    _public_error(message, code="generation_failed")
+                )
+                record.touch()
+
+        if can_fail:
+            _write_validation_report(record)
+            logger.error(
+                "Falha na geração job=%s tipo=%s",
+                record.job_id,
+                type(exc).__name__,
+            )
+        else:
+            logger.warning(
+                "Falha tardia descartada job=%s tipo=%s status=%s",
+                record.job_id,
+                type(exc).__name__,
+                record.status,
+            )
     finally:
+        with JOBS_LOCK:
+            if (
+                JOBS.get(record.job_id) is record
+                and record.generation_token == token
+            ):
+                record.generation_worker_active = False
+                record.generation_token = None
+                if record.generation_timed_out:
+                    record.touch()
         _discard_pipeline_state(record.job_id)
 
 
@@ -1710,67 +1856,91 @@ async def _execute_generation(
 async def generate_document(payload: GenerateRequest) -> JSONResponse:
     cleanup_expired_jobs()
     record = _get_job(payload.job_id)
-    if record.status in {"receiving", "validating", "generating"}:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "job_busy",
-                "message": "Esta execução ainda está sendo processada.",
-            },
-        )
-    if record.status in {"validation_failed", "failed"} or record.errors:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "validation_errors",
-                "message": "Corrija os erros de validação antes de gerar.",
-            },
-        )
-    validated_compatibility = record.compatibility is not None
-    if payload.compatibility_mode != validated_compatibility:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "validation_stale",
-                "message": (
-                    "O modo de compatibilidade mudou. "
-                    "Valide os arquivos novamente."
-                ),
-            },
-        )
-    if record.status == "completed":
-        return JSONResponse(status_code=200, content=_job_snapshot(record))
-    if record.status not in {"validated", "needs_reconciliation"}:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "job_not_validated",
-                "message": "Valide os arquivos antes de gerar o documento.",
-            },
-        )
-
     reconciliation = payload.reconciliation_payload()
-    if record.status == "needs_reconciliation" and not reconciliation:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={
-                "code": "reconciliation_required",
-                "message": "Revise todas as correspondências de GHE.",
-            },
-        )
+    generation_token = secrets.token_hex(16)
+    with JOBS_LOCK:
+        if JOBS.get(record.job_id) is not record:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Execução não encontrada.",
+            )
+        if (
+            record.status in {"receiving", "validating", "generating"}
+            or record.generation_worker_active
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "job_busy",
+                    "message": "Esta execução ainda está sendo processada.",
+                },
+            )
+        if record.status in {"validation_failed", "failed"} or record.errors:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "validation_errors",
+                    "message": "Corrija os erros de validação antes de gerar.",
+                },
+            )
+        validated_compatibility = record.compatibility is not None
+        if payload.compatibility_mode != validated_compatibility:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "validation_stale",
+                    "message": (
+                        "O modo de compatibilidade mudou. "
+                        "Valide os arquivos novamente."
+                    ),
+                },
+            )
+        if record.status == "completed":
+            return JSONResponse(status_code=200, content=_job_snapshot(record))
+        if record.status not in {"validated", "needs_reconciliation"}:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "job_not_validated",
+                    "message": "Valide os arquivos antes de gerar o documento.",
+                },
+            )
+        if record.status == "needs_reconciliation" and not reconciliation:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "code": "reconciliation_required",
+                    "message": "Revise todas as correspondências de GHE.",
+                },
+            )
 
-    _set_job_state(
-        record,
-        job_status="generating",
-        stage="Preparando geração",
-        progress=55,
-    )
-    task = asyncio.create_task(
-        _execute_generation(
-            record,
-            reconciliation,
+        record.status = "generating"
+        record.stage = "Preparando geração"
+        record.progress = 55
+        record.error_message = None
+        record.generation_token = generation_token
+        record.generation_worker_active = True
+        record.generation_timed_out = False
+        record.touch()
+
+    try:
+        task = asyncio.create_task(
+            _execute_generation(
+                record,
+                reconciliation,
+                generation_token,
+            )
         )
-    )
+    except Exception:
+        with JOBS_LOCK:
+            if record.generation_token == generation_token:
+                record.generation_token = None
+                record.generation_worker_active = False
+                record.status = "failed"
+                record.stage = "Falha ao iniciar a geração"
+                record.error_message = "Não foi possível iniciar a geração."
+                record.touch()
+        raise
     RUNNING_TASKS.add(task)
     task.add_done_callback(RUNNING_TASKS.discard)
     return JSONResponse(

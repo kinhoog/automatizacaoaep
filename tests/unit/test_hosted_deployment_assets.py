@@ -249,6 +249,8 @@ def test_dockerfile_and_render_blueprint_are_hardened_for_hosting() -> None:
     assert "AEP_REQUIRE_ORIGIN" in blueprint
     assert "AEP_JOB_TTL_SECONDS" in blueprint
     assert 'value: "900"' in blueprint
+    assert "AEP_GENERATION_STALE_SECONDS" in blueprint
+    assert 'value: "600"' in blueprint
     assert "AEP_HOSTED_TEMPLATE_BASE64_FILES" in blueprint
     assert "/etc/secrets/aep_template.docx.b64.part01" in blueprint
     assert "/etc/secrets/aep_template.docx.b64.part02" in blueprint

@@ -5,8 +5,10 @@ import io
 import json
 import os
 import shutil
+import threading
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -578,6 +580,213 @@ def test_expired_job_cleanup_removes_only_its_runtime_directory(
     assert job_id not in web_app.JOBS
     assert not record.job_dir.exists()
     assert unrelated.read_text(encoding="utf-8") == "fixture sintética"
+
+
+def test_stalled_generation_becomes_terminal_failure(
+    api_client: TestClient,
+    validate_job: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = validate_job["job_id"]
+    record = web_app.JOBS[job_id]
+    now = time.time()
+    monkeypatch.setattr(web_app, "GENERATION_STALE_SECONDS", 60)
+    record.status = "generating"
+    record.stage = "montando Word"
+    record.progress = 60
+    record.updated_at = now - 61
+
+    removed = web_app.cleanup_expired_jobs(now=now)
+    snapshot = api_client.get(f"/api/jobs/{job_id}").json()
+
+    assert removed == 0
+    assert snapshot["status"] == "failed"
+    assert snapshot["stage"] == "Tempo limite da geração excedido"
+    assert snapshot["error"]
+    assert snapshot["errors"][-1]["code"] == "generation_timeout"
+    assert record.generation_timed_out is True
+    assert record.validation_report_path is not None
+    report = json.loads(record.validation_report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "failed"
+    assert report["errors"][-1]["code"] == "generation_timeout"
+
+    assert api_client.delete(f"/api/jobs/{job_id}").status_code == 204
+    assert job_id not in web_app.JOBS
+
+
+def test_timed_out_worker_cannot_publish_or_lose_its_runtime_directory(
+    api_client: TestClient,
+    validate_job: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = validate_job["job_id"]
+    record = web_app.JOBS[job_id]
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    def blocked_generation(**_: Any) -> dict[str, Any]:
+        worker_started.set()
+        if not release_worker.wait(timeout=5):
+            raise RuntimeError("synthetic worker release timed out")
+        return {}
+
+    monkeypatch.setattr(
+        web_app.PIPELINE_INSTANCE,
+        "generate",
+        blocked_generation,
+    )
+    response = api_client.post(
+        "/api/generate",
+        json={
+            "job_id": job_id,
+            "reconciliations": [_extra_ergo_decision(validate_job)],
+        },
+    )
+    assert response.status_code == 202
+    assert worker_started.wait(timeout=2)
+
+    try:
+        now = time.time()
+        monkeypatch.setattr(web_app, "GENERATION_STALE_SECONDS", 60)
+        with web_app.JOBS_LOCK:
+            record.updated_at = now - 61
+
+        assert web_app.cleanup_expired_jobs(now=now) == 0
+        assert record.status == "failed"
+        assert record.generation_timed_out is True
+        assert record.generation_worker_active is True
+        assert record.job_dir.is_dir()
+        assert api_client.delete(f"/api/jobs/{job_id}").status_code == 409
+        assert record.job_dir.is_dir()
+    finally:
+        release_worker.set()
+
+    deadline = time.monotonic() + 3
+    while record.generation_worker_active and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert record.generation_worker_active is False
+    assert record.status == "failed"
+    assert record.document_path is None
+    assert [
+        item["code"] for item in record.errors
+    ].count("generation_timeout") == 1
+
+    record.updated_at = time.time() - web_app.JOB_TTL_SECONDS - 1
+    assert web_app.cleanup_expired_jobs() == 1
+    assert job_id not in web_app.JOBS
+    assert not record.job_dir.exists()
+
+
+def test_generation_claim_allows_only_one_concurrent_post(
+    api_client: TestClient,
+    validate_job: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = validate_job["job_id"]
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    invocation_lock = threading.Lock()
+    invocation_count = 0
+
+    def blocked_generation(**_: Any) -> dict[str, Any]:
+        nonlocal invocation_count
+        with invocation_lock:
+            invocation_count += 1
+        worker_started.set()
+        if not release_worker.wait(timeout=5):
+            raise RuntimeError("synthetic worker release timed out")
+        return {}
+
+    monkeypatch.setattr(
+        web_app.PIPELINE_INSTANCE,
+        "generate",
+        blocked_generation,
+    )
+    payload = {
+        "job_id": job_id,
+        "reconciliations": [_extra_ergo_decision(validate_job)],
+    }
+    request_barrier = threading.Barrier(2)
+
+    def post_generation() -> int:
+        request_barrier.wait(timeout=2)
+        return api_client.post("/api/generate", json=payload).status_code
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            statuses = sorted(executor.map(lambda _: post_generation(), range(2)))
+        assert statuses == [202, 409]
+        assert worker_started.wait(timeout=2)
+        assert invocation_count == 1
+    finally:
+        release_worker.set()
+
+
+def test_timeout_during_artifact_check_cannot_publish_document(
+    api_client: TestClient,
+    validate_job: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = validate_job["job_id"]
+    record = web_app.JOBS[job_id]
+    document_stream = io.BytesIO()
+    Document().save(document_stream)
+    artifact_check_started = threading.Event()
+    release_artifact_check = threading.Event()
+    original_validate_real_type = web_app._validate_real_type
+
+    def generated_document(**_: Any) -> dict[str, Any]:
+        return {"document_bytes": document_stream.getvalue()}
+
+    def blocked_artifact_check(*args: Any, **kwargs: Any) -> None:
+        artifact_check_started.set()
+        if not release_artifact_check.wait(timeout=5):
+            raise RuntimeError("synthetic artifact release timed out")
+        original_validate_real_type(*args, **kwargs)
+
+    monkeypatch.setattr(
+        web_app.PIPELINE_INSTANCE,
+        "generate",
+        generated_document,
+    )
+    monkeypatch.setattr(
+        web_app,
+        "_validate_real_type",
+        blocked_artifact_check,
+    )
+    response = api_client.post(
+        "/api/generate",
+        json={
+            "job_id": job_id,
+            "reconciliations": [_extra_ergo_decision(validate_job)],
+        },
+    )
+    assert response.status_code == 202
+    assert artifact_check_started.wait(timeout=2)
+
+    try:
+        now = time.time()
+        monkeypatch.setattr(web_app, "GENERATION_STALE_SECONDS", 60)
+        with web_app.JOBS_LOCK:
+            record.updated_at = now - 61
+        assert web_app.cleanup_expired_jobs(now=now) == 0
+        assert record.status == "failed"
+        assert record.generation_worker_active is True
+    finally:
+        release_artifact_check.set()
+
+    deadline = time.monotonic() + 3
+    while record.generation_worker_active and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert record.generation_worker_active is False
+    assert record.status == "failed"
+    assert record.document_path is None
+    assert record.validation_report_path is not None
+    report = json.loads(record.validation_report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "failed"
+    assert report["errors"][-1]["code"] == "generation_timeout"
 
 
 def test_orphan_cleanup_retries_after_transient_failure(
