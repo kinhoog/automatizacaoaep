@@ -39,21 +39,27 @@ def test_frontend_is_static_and_works_below_github_pages_subdirectory() -> None:
         assert "<base " not in page.lower()
 
 
-def test_main_page_starts_with_the_form_and_guide_is_a_separate_page() -> None:
+def test_main_page_uses_editorial_landing_with_form_and_separate_guide() -> None:
     index = _read(FRONTEND / "index.html")
     guide = _read(FRONTEND / "como-funciona.html")
     guide_copy = " ".join(re.sub(r"<[^>]+>", " ", guide).casefold().split())
 
-    assert '<main id="conteudo">' in index
-    assert '<div class="shell workspace">' in index
+    assert '<body class="app-page">' in index
+    assert '<main id="conteudo" class="app-landing">' in index
+    assert '<div class="shell app-landing__grid">' in index
+    assert '<aside class="app-intro"' in index
+    assert "Menos montagem." in index
+    assert '<div class="workspace">' in index
     assert '<section class="hero">' not in index
     assert 'class="process-card"' not in index
     assert "Etapas do processo" not in index
-    assert index.index('<div class="shell workspace">') < index.index('id="aep-form"')
+    assert index.index('<div class="workspace">') < index.index('id="aep-form"')
 
     assert "Como funciona" in guide
     for stage in ("envie", "valide", "reconcilie", "gere"):
         assert stage in guide_copy
+    assert 'class="process-list"' in guide
+    assert "guide-card" not in guide
     assert "app.js" not in guide
     assert "config.js" not in guide
     assert "processamento temporário" in guide_copy

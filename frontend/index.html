@@ -5,58 +5,81 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Compile relatórios técnicos no modelo oficial da AEP, com validação e reconciliação de GHEs.">
     <title>Automatizador de Documentos AEP</title>
-    <link rel="stylesheet" href="./styles.css?v=0.3.0">
-    <script src="./config.js?v=0.3.0"></script>
-    <script src="./app.js?v=0.3.0" defer></script>
+    <link rel="stylesheet" href="./styles.css?v=0.4.0">
+    <script src="./config.js?v=0.4.0"></script>
+    <script src="./app.js?v=0.4.0" defer></script>
   </head>
-  <body>
+  <body class="app-page">
     <a class="skip-link" href="#conteudo">Ir para o conteúdo</a>
 
     <header class="topbar">
       <div class="shell topbar__inner">
         <a class="brand" href="./" aria-label="Automatizador de Documentos AEP">
-          <span class="brand__mark" aria-hidden="true">
-            <svg viewBox="0 0 40 40" role="img">
-              <path d="M9 5h15l7 7v23H9z"></path>
-              <path d="M24 5v8h7M14 20h12M14 25h12M14 30h8"></path>
-            </svg>
-          </span>
+          <span class="brand__mark brand__mark--type" aria-hidden="true">AEP</span>
           <span>
             <strong>Automatizador AEP</strong>
-            <small>Compilação segura de documentos</small>
+            <small>Compilação documental</small>
           </span>
         </a>
-        <div class="topbar__actions">
-          <a class="topbar__link" href="./como-funciona.html">Como funciona</a>
-          <div class="processing-badge">
-            <span class="processing-badge__dot" aria-hidden="true"></span>
-            Processamento temporário
-          </div>
-        </div>
+        <a class="topbar__link" href="./como-funciona.html">
+          Como funciona <span aria-hidden="true">↗</span>
+        </a>
       </div>
     </header>
 
-    <main id="conteudo">
-      <div class="shell workspace">
-        <nav class="stepper" aria-label="Progresso do formulário">
+    <main id="conteudo" class="app-landing">
+      <div class="shell app-landing__grid">
+        <aside class="app-intro" aria-labelledby="app-intro-title">
+          <div class="app-intro__copy">
+            <p class="app-intro__folio">AEP / COMPILAÇÃO DOCUMENTAL</p>
+            <h1 id="app-intro-title">Menos montagem.<br><em>Mais revisão.</em></h1>
+            <p class="app-intro__lead">
+              Envie os relatórios aprovados, confira os GHEs e baixe o AEP em
+              Word — sem remontar o documento página por página.
+            </p>
+            <a class="app-intro__link" href="./como-funciona.html">
+              Entenda o fluxo <span aria-hidden="true">↗</span>
+            </a>
+          </div>
+
+          <dl class="app-intro__facts">
+            <div>
+              <dt>Saída</dt>
+              <dd>DOCX editável</dd>
+            </div>
+            <div>
+              <dt>Análise</dt>
+              <dd>Conteúdo aprovado</dd>
+            </div>
+          </dl>
+
+          <p class="app-intro__privacy">
+            <span aria-hidden="true"></span>
+            Os arquivos ficam disponíveis apenas durante a execução e são
+            removidos após o download ou pelo prazo de segurança.
+          </p>
+
+          <nav class="stepper" aria-label="Progresso do formulário">
           <button class="stepper__item is-active" type="button" data-step-link="1" aria-current="step">
-            <span>1</span>
+            <span>01</span>
             <span><strong>Identificação</strong><small>Dados do documento</small></span>
           </button>
           <button class="stepper__item" type="button" data-step-link="2">
-            <span>2</span>
+            <span>02</span>
             <span><strong>Arquivos</strong><small>Fontes oficiais</small></span>
           </button>
           <button class="stepper__item" type="button" data-step-link="3" disabled>
-            <span>3</span>
+            <span>03</span>
             <span><strong>Validação</strong><small>GHEs e divergências</small></span>
           </button>
           <button class="stepper__item" type="button" data-step-link="4" disabled>
-            <span>4</span>
+            <span>04</span>
             <span><strong>Resultado</strong><small>Documento editável</small></span>
           </button>
-        </nav>
+          </nav>
+        </aside>
 
+        <div class="workspace">
         <form id="aep-form" novalidate>
           <section class="panel" id="step-1" data-step="1">
             <div class="section-heading">
@@ -483,6 +506,7 @@
           </div>
           <button type="button" id="dismiss-error" aria-label="Fechar aviso">×</button>
         </section>
+        </div>
       </div>
     </main>
 
