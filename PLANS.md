@@ -58,3 +58,21 @@
 ## Critério do MVP
 
 O MVP está aceito quando valida os uploads, identifica e reconcilia GHEs, gera um DOCX editável com todos os blocos obrigatórios, passa os testes sintéticos e o piloto privado, produz a comparação, inicia no Windows por PowerShell e não prepara nenhum dado privado para commit.
+
+## Resultado da primeira execução
+
+- Fluxo FastAPI e interface web implementados de ponta a ponta, incluindo os dois modos de análise, reconciliação explícita e downloads.
+- Fixtures públicas sintéticas criadas e identificadas como sem validade; a suíte cobre extração, validação, segurança, montagem, mutação, limpeza e API.
+- Piloto privado executado em modo de compatibilidade, com os quatro blocos Ergo auditados e a exceção visual mantida somente no relatório local.
+- Saída e gabarito renderizados pelo LibreOffice 26.2.4: 28 páginas em ambos, sem página em branco inesperada e com a mesma contagem de seções, parágrafos, tabelas e mídias.
+- Fluxo real da interface validado em navegador com arquivos sintéticos: upload sem logo, resumo dos GHEs, escolha de não aplicável, geração e download do DOCX.
+- Áreas privadas, temporárias, saídas e runtime do renderizador permanecem ignorados pelo Git.
+
+## Verificação final do MVP
+
+- O template privado foi saneado sem alterar o original; o manifesto registra 287 marcadores, mídia neutra, hash e capacidade de três GHEs. A montagem rejeita manifesto ausente, adulteração, resíduo e excesso de capacidade.
+- O modo de compatibilidade só é aceito com perfil privado vinculado criptograficamente às fontes exatas; o piloto registrou três blocos Ergo incluídos e um omitido.
+- A suíte final passou com 55 testes. Também passaram `compileall`, validação sintática do JavaScript e a geração/download pela interface em viewport desktop e móvel.
+- O piloto privado produziu um DOCX editável com 28 páginas, duas seções, 334 parágrafos, 20 tabelas, 10 imagens inline e nenhum marcador residual.
+- A comparação LibreOffice encontrou a mesma estrutura (`2/334/20/10/12`) e 28 páginas nos dois documentos, similaridade textual de 98,32%, presença textual de 96,73% e média de 5,13% de pixels alterados, sem cortes, sobreposições ou páginas em branco inesperadas.
+- O teste HTTP real confirmou validação, quatro blocos Ergo detectados, reconciliação, geração, download e descarte do modelo temporário; o teste de mutação confirmou que alterações sintéticas nas entradas mudam a saída.
