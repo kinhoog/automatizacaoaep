@@ -2,37 +2,83 @@
 
 ## Visão geral
 
-O sistema é um monólito local em FastAPI. A interface envia arquivos por `multipart/form-data`; a camada HTTP os valida e os armazena em uma pasta aleatória da execução. A pipeline extrai cada fonte, cria um modelo normalizado, valida e reconcilia GHEs e, após confirmação do usuário, monta um DOCX sobre o template privado.
+O sistema separa a interface pública do processamento documental:
 
 ```mermaid
 flowchart LR
-    UI["Interface HTML/CSS/JS"] --> API["FastAPI"]
-    API --> SEC["Validação e isolamento dos uploads"]
-    SEC --> EXT["Extratores por fonte"]
+    U["Navegador do usuário"] -->|HTTPS| P["GitHub Pages<br/>frontend estático"]
+    P -->|HTTPS + multipart/form-data| API["FastAPI<br/>Web Service Docker"]
+    API --> SEC["Validação e isolamento"]
+    SEC --> EXT["Extratores Python"]
     EXT --> MODEL["Modelo AEP normalizado"]
-    MODEL --> VAL["Validação e reconciliação"]
-    VAL --> UI
-    VAL --> ASM["Montador DOCX"]
-    TPL["Template + manifesto privados"] --> ASM
-    ASM --> DOCX["DOCX editável"]
-    ASM --> AUDIT["Relatório JSON"]
-    DOCX --> RENDER["LibreOffice / Word local"]
+    MODEL --> REC["Validação e reconciliação"]
+    REC --> ASM["Montador DOCX"]
+    TPL["Secret Files<br/>template + manifesto + perfil"] --> BOOT["Decodificação e auditoria no startup"]
+    BOOT --> ASM
+    ASM --> TMP["/tmp/aep-jobs/job_id"]
+    TMP -->|Blob DOCX| U
+    U -->|DELETE após receber| API
+    API --> CLEAN["Remoção explícita ou TTL"]
 ```
 
-## Camadas
+O frontend fica no GitHub Pages e contém apenas HTML, CSS, JavaScript e ativos públicos. O backend continua em Python/FastAPI, usa LibreOffice headless no container e processa os arquivos em armazenamento efêmero. Não há banco de dados, disco persistente ou sessão durável.
 
-### HTTP e interface
+## Frontend estático
 
-- `app/main.py`: rotas, limites de requisição, validação inicial, estado dos jobs e downloads;
-- `app/static/index.html`: formulário, revisão e área de resultado;
-- `app/static/app.js`: seleção do modo técnico, envio, reconciliação, polling e downloads;
-- `app/static/styles.css`: identidade e responsividade.
+Arquivos:
 
-A API não recebe caminhos locais. Ela converte o nome do upload em um nome interno conhecido e associa o arquivo a um job de 32 caracteres hexadecimais.
+- `frontend/index.html`: formulário, revisão, progresso, downloads e política de privacidade;
+- `frontend/styles.css`: identidade visual e responsividade;
+- `frontend/app.js`: uploads, validação, reconciliação, polling, download como `Blob` e exclusão;
+- `frontend/config.js`: contrato público `window.AEP_CONFIG`;
+- `frontend/assets/`: recursos públicos sem dados privados.
+
+O workflow `.github/workflows/deploy-pages.yml` publica somente essa pasta. A URL da API é gerada no deploy a partir de:
+
+```javascript
+window.AEP_CONFIG = {
+  API_BASE_URL: "https://origem-do-backend"
+};
+```
+
+O valor vem da variável de repositório `AEP_API_BASE_URL`. Todas as referências do frontend são relativas para funcionar em `/automatizacaoaep/`. Uma URL vazia deixa a interface visível, mas desabilita o envio e não cria um backend fictício.
+
+O frontend não contém Python, FastAPI, LibreOffice, template, credencial ou processamento documental. Ele orquestra o fluxo e exibe os dados retornados pela API.
+
+## Backend FastAPI
+
+### Camada HTTP
+
+`app/main.py` concentra:
+
+- rotas da API;
+- limites de arquivo e requisição;
+- nomes internos sanitizados;
+- validação inicial;
+- estado temporário dos jobs;
+- CORS e verificação explícita de origem;
+- cabeçalhos `Cache-Control: no-store`;
+- download e limpeza;
+- rotina periódica de expiração.
+
+A API não recebe caminhos locais. Ela associa cada arquivo a um nome interno conhecido dentro do diretório aleatório do job.
+
+Rotas:
+
+| Método | Rota | Responsabilidade |
+| --- | --- | --- |
+| `GET` | `/api/health` | Liveness e prontidão da pipeline |
+| `POST` | `/api/validate` | Upload, extração e validação |
+| `POST` | `/api/generate` | Decisões de reconciliação e montagem |
+| `GET` | `/api/jobs/{id}` | Progresso e estado |
+| `GET` | `/api/jobs/{id}/document` | DOCX para o fluxo Blob + exclusão explícita |
+| `GET` | `/api/jobs/{id}/validation-report` | Relatório JSON |
+| `GET` | `/api/jobs/{id}/download` | DOCX com limpeza posterior à resposta |
+| `DELETE` | `/api/jobs/{id}` | Remoção explícita |
 
 ### Domínio
 
-`app/models/domain.py` contém modelos Pydantic para:
+`app/models/domain.py` define modelos Pydantic para:
 
 - empresa e dados do documento;
 - GHEs oficiais e população;
@@ -42,14 +88,14 @@ A API não recebe caminhos locais. Ela converte o nome do upload em um nome inte
 - propostas e decisões de reconciliação;
 - avisos, erros e exceções de compatibilidade.
 
-Caminhos e bytes de trabalho não fazem parte da exportação de auditoria. Nomes individuais provenientes da planilha são descartados antes da normalização. O modelo normalizado confidencial permanece temporariamente em memória entre validação e geração e é descartado após geração, falha ou expiração.
+Caminhos e bytes de trabalho não fazem parte da exportação de auditoria. Nomes individuais provenientes da planilha são descartados antes da normalização. O modelo normalizado permanece em memória apenas durante a vida do job.
 
 ### Extração
 
 - `ghe_extractor.py`: lê a planilha oficial e calcula população, setores e cargos;
-- `ergo_extractor.py`: detecta HTML disfarçado de `.doc`, preserva a ordem visual e prepara conversão segura de OLE verdadeiro;
-- `psico_extractor.py`: extrai imagens do pacote DOCX e as associa por títulos, GHE, dimensões e posição;
-- `technical_report_extractor.py`: lê o relatório integrado ou combina os dois relatórios separados sem reescrever o conteúdo aprovado.
+- `ergo_extractor.py`: detecta HTML com extensão `.doc`, preserva a ordem visual e prepara conversão segura de OLE verdadeiro;
+- `psico_extractor.py`: extrai imagens do DOCX e as associa por títulos, GHE, dimensões e posição;
+- `technical_report_extractor.py`: lê o relatório integrado ou combina dois relatórios separados sem reescrever o conteúdo aprovado.
 
 Cada extrator produz dados de domínio e metadados de proveniência. Não há inferência de novas conclusões.
 
@@ -58,111 +104,153 @@ Cada extrator produz dados de domínio e metadados de proveniência. Não há in
 - `normalization.py`: padroniza espaços, códigos, datas e rótulos;
 - `validation.py`: aplica regras de arquivo, completude, população, imagens e conteúdo obrigatório;
 - `reconciliation.py`: compara blocos do Ergo com GHEs oficiais e registra a escolha explícita;
-- `pipeline.py`: coordena as etapas e entrega contratos simples para a API.
+- `pipeline.py`: coordena as etapas e entrega contratos para a API.
 
-A planilha é a fonte de verdade para identidade e população dos GHEs. Uma semelhança de nome pode gerar uma sugestão, nunca uma correção silenciosa. O usuário precisa aprovar um destino oficial ou marcar o bloco como não aplicável.
+A planilha é a fonte de verdade para identidade e população dos GHEs. Semelhança de nome pode gerar sugestão, nunca correção silenciosa. O usuário aprova um destino oficial ou marca o bloco como não aplicável.
 
-O modo de compatibilidade registra inclusões e omissões excepcionais com justificativa e aceite. Um perfil privado contém apenas os ordinais e uma impressão digital criptográfica das fontes esperadas; qualquer arquivo, modo de análise ou seleção diferente invalida o perfil. Essa decisão permanece no relatório de validação e não altera a regra geral.
+O modo de compatibilidade usa um perfil privado vinculado por hash às fontes esperadas. Qualquer alteração de arquivo, modo ou seleção invalida esse perfil.
 
 ### Montagem e renderização
 
-- `document_assembler.py`: abre o template privado, preenche slots, substitui imagens, mantém estilos e cria o DOCX editável;
-- `image_processing.py`: prepara imagens para os espaços do modelo sem distorcer proporções;
-- `document_renderer.py`: converte `.doc` OLE sem shell, em perfil isolado e com macros desabilitadas, valida o resultado e renderiza por LibreOffice; no Windows pode usar Word como fallback;
-- `scripts/prepare_private_template.py`: cria uma cópia saneada e parametrizada, além do manifesto, sem alterar o gabarito;
-- `scripts/prepare_compatibility_profile.py`: cria um perfil privado vinculado ao conjunto exato de fontes de uma regressão excepcional;
+- `document_assembler.py`: abre o template privado, preenche slots, substitui imagens, preserva estilos e cria o DOCX editável;
+- `image_processing.py`: ajusta imagens sem distorcer proporções;
+- `document_renderer.py`: converte `.doc` OLE em perfil isolado e renderiza com LibreOffice;
+- `scripts/prepare_private_template.py`: cria o template saneado e seu manifesto;
+- `scripts/prepare_hosted_template_secret.py`: valida e prepara os arquivos Base64 privados;
 - `scripts/compare_docx.py`: produz comparação estrutural e visual para regressão privada.
 
-O saneador substitui conteúdo empresarial dinâmico por marcadores e imagens neutras e registra no manifesto hashes, digest dos marcadores, contrato de mídia, contagens e capacidade. O assembler habilita a atualização de campos do Word ao abrir e, antes de preencher, valida todo esse contrato. Slots não utilizados são limpos e nenhum marcador pode permanecer na saída. O arquivo de origem não é devolvido diretamente: campos, tabelas, textos e imagens são populados a partir do modelo normalizado da execução.
+O assembler habilita atualização de campos do Word ao abrir, valida o contrato de slots e recusa marcador residual ou capacidade insuficiente.
 
-A capacidade faz parte do contrato, não de uma regra de negócio. O template privado atual possui três conjuntos de slots; um modelo com mais GHEs é rejeitado de forma explícita até que outro template declare capacidade suficiente.
+## Inicialização hospedada
+
+O template não faz parte da imagem Docker. Três arquivos privados são montados pelo provedor:
+
+```text
+/etc/secrets/aep_template.docx.b64
+/etc/secrets/aep_template.manifest.json.b64
+/etc/secrets/aep_compatibility_profile.json.b64
+```
+
+No startup, `app/services/hosted_template.py`:
+
+1. lê os arquivos pelos caminhos explicitamente configurados;
+2. decodifica Base64 estrito;
+3. grava o material em diretório temporário privado;
+4. confere hashes, manifesto, estrutura e saneamento;
+5. oferece os caminhos validados à pipeline;
+6. mantém a pipeline indisponível se uma condição obrigatória falhar.
+
+O conjunto Base64 privado medido ocupa 918.504 bytes. Ele permanece fora do Git, da imagem e do Pages.
 
 ## Fluxo de uma execução
 
 ```mermaid
 sequenceDiagram
-    participant U as Usuário
-    participant A as API
+    participant U as Navegador
+    participant F as GitHub Pages
+    participant A as FastAPI
     participant P as Pipeline
     participant W as Montador Word
 
+    U->>F: Abre /automatizacaoaep/
+    F-->>U: HTML, CSS, JS e URL pública da API
     U->>A: POST /api/validate
     A->>A: Limita, sanitiza e verifica tipo real
     A->>P: Arquivos internos + metadados
-    P->>P: Extrai e normaliza
-    P->>P: Valida e propõe reconciliação
-    P-->>A: GHEs, avisos, erros e propostas
+    P->>P: Extrai, normaliza e propõe reconciliação
+    P-->>A: GHEs, avisos e propostas
     A-->>U: Resumo do job
     U->>A: POST /api/generate + decisões
     A->>P: Decisões explícitas
-    P->>P: Aplica reconciliação e revalida
-    P->>W: Modelo normalizado
+    P->>W: Modelo revalidado
     W-->>P: DOCX editável
     P-->>A: DOCX + relatório JSON
-    U->>A: GET downloads
+    U->>A: GET /document
+    A-->>U: Corpo completo do DOCX
+    U->>U: Cria Blob e inicia download
+    U->>A: DELETE /api/jobs/{id}
+    A->>A: Remove estado e diretório
 ```
 
-Estados esperados do job:
+Estados esperados:
 
 1. `receiving`;
 2. `validating`;
 3. `validated` ou `needs_reconciliation`;
 4. `generating`;
 5. `completed`;
-6. `validation_failed` ou `failed`, quando aplicável.
+6. `validation_failed` ou `failed`.
 
-O servidor mantém metadados operacionais e, durante um job validado, o modelo normalizado em memória. Reiniciar o processo elimina esse estado. Após a geração ou uma falha, o modelo e os intermediários de conversão são descartados. Diretórios expirados são removidos com base no TTL configurado; a inicialização também procura órfãos com identificador válido e repete a remoção quando uma tentativa falha.
+O endpoint `/download` oferece uma alternativa com uma tarefa posterior à resposta. Ele não remove o documento antes de o envio terminar.
 
-## Armazenamento local
+## Retenção e armazenamento
 
 | Área | Conteúdo | Política |
 | --- | --- | --- |
-| `uploads/<job-id>/` | entradas temporárias | isolada e expirada |
-| `generated/` | trabalho intermediário | ignorada pelo Git |
-| `outputs/` | documentos e comparações locais | ignorada pelo Git |
-| `private_templates/` | template e manifesto | privada e ignorada |
-| `local_samples/` | regressões confidenciais | privada e ignorada |
-| `tests/fixtures/public_synthetic/` | fixtures sem validade | única exceção versionável |
+| `/tmp/aep-jobs/<job-id>/` | uploads, intermediários e resultados do job | temporária; DELETE ou TTL |
+| `/tmp/aep-jobs/.hosted-template-*/` | template decodificado e validado | privada e temporária durante o processo |
+| memória do processo | estado e modelo normalizado | perdida em reinício |
+| `private_templates/` local | template, manifesto, perfil e Base64 | privada e ignorada |
+| `tests/fixtures/public_synthetic/` | fixtures sem validade | única área documental versionável |
+
+`AEP_JOB_TTL_SECONDS=900` define 15 minutos. A inicialização e uma rotina periódica tentam limpar jobs vencidos. O Render não recebe Persistent Disk e o serviço mantém uma única instância, pois não existe armazenamento compartilhado.
 
 ## Controles de segurança
 
-- limite individual e limite total de requisição;
-- lista positiva de extensões por campo;
-- inspeção profunda de assinatura, XML, relações e limites de expansão ZIP para DOCX/XLSX;
-- detecção explícita de HTML compatível com Word e contêiner OLE;
-- validação de assinatura para PNG, JPEG e WebP;
-- nomes internos controlados pela aplicação;
-- resolução e conferência de que todo caminho permanece sob o job;
-- rejeição de macros, travessia ZIP e relações externas que não sejam hyperlinks;
-- conversão OLE sem shell, em perfil LibreOffice exclusivo com macros desabilitadas;
-- prontidão fechada quando o template saneado ou seu manifesto não passa na auditoria;
+- HTTPS no Pages e no endpoint público do Render;
+- CORS por lista explícita, sem `*`;
+- verificação de origem nas rotas operacionais;
+- métodos e cabeçalhos limitados ao fluxo;
+- limite individual e total de requisição;
+- inspeção de assinatura, XML, relações e expansão ZIP;
+- rejeição de macros, travessia ZIP e relações externas perigosas;
+- validação de PNG, JPEG e WebP;
+- nomes e caminhos controlados pela aplicação;
+- identificadores imprevisíveis;
+- conversão OLE sem shell e com perfil LibreOffice isolado;
+- usuário não root no container;
+- template privado validado no startup;
 - mensagens públicas sem caminhos internos;
-- logs restritos a identificador, estágio e classe de erro;
-- respostas de download com `Cache-Control: no-store`.
+- logs sem conteúdo documental;
+- respostas com `Cache-Control: no-store`;
+- exclusão explícita e TTL.
 
-O serviço escuta somente `127.0.0.1` por padrão. Como o MVP não autentica usuários, não deve ser exposto em rede sem uma camada externa apropriada.
+CORS não é autenticação. Como o MVP não possui login, a arquitetura restringe o fluxo normal do navegador, mas não transforma a API em serviço privado.
 
-## Configuração e dependências
+## Container e infraestrutura
 
-`app/config.py` resolve caminhos relativamente à raiz do projeto e centraliza template, renderizador e retenção dos serviços. `app/main.py` aplica os limites da camada HTTP. O `iniciar.ps1` lê `.env`, preservando variáveis que já existiam no processo, e inicia Uvicorn.
+O `Dockerfile`:
 
-As dependências principais são FastAPI, Pydantic, python-docx, lxml, BeautifulSoup, openpyxl e Pillow. LibreOffice e Poppler são ferramentas externas usadas para conversão e inspeção visual.
+- usa Python 3.12;
+- instala LibreOffice Writer, Poppler e fontes;
+- copia somente código e metadados necessários;
+- cria diretórios temporários graváveis;
+- executa como usuário não root;
+- usa a variável `PORT`;
+- inclui health check.
+
+O `.dockerignore` impede a cópia de áreas privadas e documentos. O `render.yaml` define um Web Service Docker, uma instância, origem permitida, TTL e caminhos dos Secret Files, sem banco e sem disco persistente.
+
+O CI executa testes Python, constrói a imagem, inspeciona a ausência de documentos privados e inicia o container para conferir prontidão, CORS, usuário e health check.
 
 ## Estratégia de testes
 
-- unitários: detecção de tipo, normalização, planilha, HTML Ergo, DOCX técnico, imagens e reconciliação;
-- integração: saúde, upload, validação, geração, download e limpeza;
-- mutação: uma alteração sintética na fonte precisa aparecer na saída;
-- regressão privada: comparação estrutural e visual entre referência aprovada e documento automático.
+- unitários: configuração, tipo real, normalização, planilha, Ergo, DOCX, imagens, reconciliação, Base64 e TTL;
+- integração: health, CORS, upload, validação, geração, download completo, exclusão e limpeza;
+- frontend: configuração da API, caminhos relativos, subdiretório do Pages e ausência de secrets;
+- container: build, usuário não root, filesystem temporário, health check e ausência de material privado;
+- mutação: alteração sintética na fonte precisa aparecer na saída;
+- regressão privada: comparação estrutural e visual entre referência aprovada e documento gerado.
 
-Todo teste versionado usa somente `tests/fixtures/public_synthetic/`. A regressão privada roda fora do histórico e seus artefatos ficam em `outputs/`.
+Todo teste versionado usa fixtures sintéticas. A regressão privada e seus artefatos permanecem fora do histórico.
 
-## Pontos de extensão
+## Limitações e extensões futuras
 
-- adaptadores de templates adicionais, cada um com seu próprio manifesto;
-- exportação secundária para PDF;
-- armazenamento persistente de jobs, se um produto multiusuário for criado;
-- fila de processamento para documentos grandes;
-- políticas adicionais de retenção e criptografia local.
+- reiniciar ou implantar o serviço interrompe jobs ativos;
+- uma única instância é necessária enquanto o estado permanecer em memória;
+- o template declara uma capacidade de slots e entradas maiores são bloqueadas;
+- o DOCX é a entrega principal; PDF permanece secundário;
+- CORS não substitui autenticação;
+- disponibilidade, logs de plataforma e descarte físico também dependem da configuração do provedor.
 
-Essas extensões não devem enfraquecer a rastreabilidade do conteúdo técnico nem a precedência da planilha oficial de GHEs.
+Possíveis extensões futuras incluem autenticação, fila distribuída e armazenamento temporário criptografado compartilhado. Elas exigem nova análise de privacidade e não devem enfraquecer a rastreabilidade do conteúdo técnico.

@@ -76,3 +76,60 @@ O MVP está aceito quando valida os uploads, identifica e reconcilia GHEs, gera 
 - O piloto privado produziu um DOCX editável com 28 páginas, duas seções, 334 parágrafos, 20 tabelas, 10 imagens inline e nenhum marcador residual.
 - A comparação LibreOffice encontrou a mesma estrutura (`2/334/20/10/12`) e 28 páginas nos dois documentos, similaridade textual de 98,32%, presença textual de 96,73% e média de 5,13% de pixels alterados, sem cortes, sobreposições ou páginas em branco inesperadas.
 - O teste HTTP real confirmou validação, quatro blocos Ergo detectados, reconciliação, geração, download e descarte do modelo temporário; o teste de mutação confirmou que alterações sintéticas nas entradas mudam a saída.
+
+## Plano da migração para entrega hospedada
+
+1. **Separar a interface**
+   - Extrair a experiência pública para `frontend/`, mantendo HTML, CSS e JavaScript independentes do FastAPI.
+   - Usar apenas caminhos relativos compatíveis com `/automatizacaoaep/`.
+   - Resolver a origem da API por `window.AEP_CONFIG.API_BASE_URL`, sem credenciais no cliente.
+
+2. **Publicar no GitHub Pages**
+   - Criar um workflow acionado por push em `main`.
+   - Gerar `config.js` com a variável pública `AEP_API_BASE_URL`.
+   - Publicar somente `frontend/` pelas ações oficiais do Pages.
+
+3. **Adaptar o runtime Python**
+   - Preservar a pipeline, os extratores, a reconciliação e o montador Word existentes.
+   - Aceitar `PORT`, escutar em `0.0.0.0` e restringir CORS à origem oficial.
+   - Aplicar `Cache-Control: no-store` e exigir origem permitida nas rotas operacionais.
+
+4. **Reduzir a retenção**
+   - Criar cada job em `/tmp/aep-jobs/<job_id>/`.
+   - Receber o DOCX como `Blob` antes de solicitar `DELETE /api/jobs/{id}`.
+   - Oferecer `/download` com limpeza posterior à resposta.
+   - Executar limpeza na inicialização, periodicamente e após 900 segundos para jobs abandonados.
+
+5. **Proteger o template**
+   - Manter template, manifesto, perfil e Base64 em `private_templates/`.
+   - Validar e preparar três Secret Files com `scripts/prepare_hosted_template_secret.py`.
+   - Decodificar no startup, conferir hash e manifesto e falhar de modo fechado.
+   - Não copiar material privado para imagem, frontend, release ou histórico.
+
+6. **Empacotar e hospedar**
+   - Criar uma imagem com Python, LibreOffice headless, fontes e usuário não root.
+   - Declarar um único Web Service Docker no `render.yaml`, sem banco ou disco persistente.
+   - Usar health check para só liberar a pipeline validada.
+
+7. **Testar**
+   - Preservar a suíte existente e cobrir CORS, `PORT`, Base64, hash inválido, downloads, exclusão, TTL, Pages e cache.
+   - Construir e inspecionar a imagem no CI, confirmando a ausência de material privado.
+   - Reexecutar a regressão privada estrutural e visual antes da publicação.
+
+8. **Publicar e verificar**
+   - Enviar código e workflows ao repositório.
+   - Criar o Blueprint no Render e cadastrar os Secret Files por canal privado.
+   - Configurar `AEP_API_BASE_URL`, republicar o Pages e testar o fluxo público.
+   - Confirmar exclusão explícita e expiração sem afirmar garantias forenses do provedor.
+
+## Resultado preparado da migração hospedada
+
+- A arquitetura pública está separada entre GitHub Pages e FastAPI, sem mover o compilador para JavaScript.
+- O frontend estático preserva o fluxo de dados, uploads, validação, reconciliação, geração, progresso e download.
+- O download principal recebe todo o DOCX antes da exclusão explícita; um endpoint alternativo agenda limpeza depois da resposta.
+- Jobs usam `/tmp/aep-jobs`, TTL inicial de 900 segundos e varreduras de inicialização e periódica.
+- CORS usa lista explícita com `https://kinhoog.github.io`; a configuração de produção não usa curinga.
+- O container inclui LibreOffice e fontes, executa como usuário não root, não solicita armazenamento persistente e expõe health check.
+- O template hospedado é fornecido por três Secret Files. O conjunto Base64 medido ocupa 918.504 bytes, sob o limite de 1 MiB aplicado pelo preparador.
+- O workflow do Pages gera `config.js` a partir de `AEP_API_BASE_URL`; nenhum token ou template faz parte do artefato público.
+- O CI cobre a suíte Python, build e inspeção do container. A implantação efetiva exige acesso administrativo ao GitHub Pages e ao Render, além do cadastro privado dos Secret Files.
