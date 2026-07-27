@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Compile relatórios técnicos no modelo oficial da AEP, com validação e reconciliação de GHEs.">
+    <title>Automatizador de Documentos AEP</title>
+    <link rel="stylesheet" href="/static/styles.css?v=0.1.1">
+    <script src="/static/app.js?v=0.1.1" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#conteudo">Ir para o conteúdo</a>
+
+    <header class="topbar">
+      <div class="shell topbar__inner">
+        <a class="brand" href="/" aria-label="Automatizador de Documentos AEP">
+          <span class="brand__mark" aria-hidden="true">
+            <svg viewBox="0 0 40 40" role="img">
+              <path d="M9 5h15l7 7v23H9z"></path>
+              <path d="M24 5v8h7M14 20h12M14 25h12M14 30h8"></path>
+            </svg>
+          </span>
+          <span>
+            <strong>Automatizador AEP</strong>
+            <small>Compilação local de documentos</small>
+          </span>
+        </a>
+        <div class="local-badge">
+          <span class="local-badge__dot" aria-hidden="true"></span>
+          Processamento 100% local
+        </div>
+      </div>
+    </header>
+
+    <main id="conteudo">
+      <section class="hero">
+        <div class="shell hero__grid">
+          <div class="hero__copy">
+            <p class="eyebrow">Documento editável, rastreável e padronizado</p>
+            <h1>Transforme os relatórios aprovados em um AEP completo.</h1>
+            <p class="hero__lead">
+              Envie as fontes oficiais, valide os GHEs e revise qualquer
+              divergência antes de gerar o Word no modelo da AEP.
+            </p>
+            <div class="hero__assurances" aria-label="Características">
+              <span>
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7"></path></svg>
+                Sem envio à nuvem
+              </span>
+              <span>
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7"></path></svg>
+                Sem novas conclusões técnicas
+              </span>
+              <span>
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7"></path></svg>
+                Saída DOCX editável
+              </span>
+            </div>
+          </div>
+          <aside class="process-card" aria-label="Etapas do processo">
+            <p class="process-card__title">Como funciona</p>
+            <ol>
+              <li><span>1</span><div><strong>Envie</strong><small>Dados e fontes oficiais</small></div></li>
+              <li><span>2</span><div><strong>Valide</strong><small>Estrutura, conteúdo e GHEs</small></div></li>
+              <li><span>3</span><div><strong>Reconcilie</strong><small>Divergências sem correção silenciosa</small></div></li>
+              <li><span>4</span><div><strong>Gere</strong><small>Documento e relatório de auditoria</small></div></li>
+            </ol>
+          </aside>
+        </div>
+      </section>
+
+      <div class="shell workspace">
+        <nav class="stepper" aria-label="Progresso do formulário">
+          <button class="stepper__item is-active" type="button" data-step-link="1" aria-current="step">
+            <span>1</span>
+            <span><strong>Identificação</strong><small>Dados do documento</small></span>
+          </button>
+          <button class="stepper__item" type="button" data-step-link="2">
+            <span>2</span>
+            <span><strong>Arquivos</strong><small>Fontes oficiais</small></span>
+          </button>
+          <button class="stepper__item" type="button" data-step-link="3" disabled>
+            <span>3</span>
+            <span><strong>Validação</strong><small>GHEs e divergências</small></span>
+          </button>
+          <button class="stepper__item" type="button" data-step-link="4" disabled>
+            <span>4</span>
+            <span><strong>Resultado</strong><small>Documento editável</small></span>
+          </button>
+        </nav>
+
+        <form id="aep-form" novalidate>
+          <section class="panel" id="step-1" data-step="1">
+            <div class="section-heading">
+              <div>
+                <p class="section-kicker">Etapa 1 de 4</p>
+                <h2>Identificação do documento</h2>
+                <p>Esses dados serão usados na capa e nos campos de referência.</p>
+              </div>
+              <span class="required-note"><i aria-hidden="true">*</i> Obrigatório</span>
+            </div>
+
+            <div class="field-grid">
+              <div class="field field--wide">
+                <label for="company-name">Razão social <span aria-hidden="true">*</span></label>
+                <input id="company-name" name="company_name" type="text" maxlength="240" autocomplete="organization" placeholder="Nome empresarial completo" required>
+                <p class="field-error" id="company-name-error"></p>
+              </div>
+              <div class="field">
+                <label for="competence">Competência <span aria-hidden="true">*</span></label>
+                <input id="competence" name="competence" type="month" required>
+                <p class="field-hint">Mês de referência do AEP.</p>
+                <p class="field-error" id="competence-error"></p>
+              </div>
+              <div class="field">
+                <label for="ergo-date">Data-base do Ergo <span aria-hidden="true">*</span></label>
+                <input id="ergo-date" name="ergo_reference_date" type="date" required>
+                <p class="field-error" id="ergo-reference-date-error"></p>
+              </div>
+              <div class="field">
+                <label for="psychosocial-date">Data-base do psicossocial <span aria-hidden="true">*</span></label>
+                <input id="psychosocial-date" name="psychosocial_reference_date" type="date" required>
+                <p class="field-error" id="psychosocial-reference-date-error"></p>
+              </div>
+            </div>
+
+            <div class="panel__footer">
+              <span></span>
+              <button class="button button--primary" type="button" data-next-step="2">
+                Continuar para arquivos
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4 6 6-6 6"></path></svg>
+              </button>
+            </div>
+          </section>
+
+          <section class="panel" id="step-2" data-step="2" hidden>
+            <div class="section-heading">
+              <div>
+                <p class="section-kicker">Etapa 2 de 4</p>
+                <h2>Fontes para compilação</h2>
+                <p>Use somente os documentos aprovados. Nenhum arquivo sai deste computador.</p>
+              </div>
+              <span class="secure-chip">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 9V6a5 5 0 0 1 10 0v3M4 9h12v9H4z"></path></svg>
+                Área temporária
+              </span>
+            </div>
+
+            <fieldset class="mode-picker">
+              <legend>Modo das análises técnicas</legend>
+              <label class="mode-option">
+                <input type="radio" name="analysis_mode" value="integrated" checked>
+                <span class="mode-option__check" aria-hidden="true"></span>
+                <span>
+                  <strong>Relatório integrado</strong>
+                  <small>Um arquivo com as análises psicossocial e ergonômica.</small>
+                </span>
+                <em>Recomendado</em>
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="analysis_mode" value="separate">
+                <span class="mode-option__check" aria-hidden="true"></span>
+                <span>
+                  <strong>Análises separadas</strong>
+                  <small>Um arquivo do Agente 1 e outro do Agente 2.</small>
+                </span>
+              </label>
+            </fieldset>
+
+            <div class="upload-group">
+              <div class="upload-group__heading">
+                <span>1</span>
+                <div>
+                  <h3>Fontes oficiais</h3>
+                  <p>Definem os GHEs, os resultados e as evidências visuais.</p>
+                </div>
+              </div>
+              <div class="upload-grid">
+                <label class="upload-card" data-upload-card>
+                  <input type="file" name="ghe_spreadsheet" accept=".xlsx" required>
+                  <span class="upload-card__icon upload-card__icon--sheet" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M6 2h9l4 4v16H6zM15 2v5h4M9 11h7M9 15h7M9 19h7"></path></svg>
+                  </span>
+                  <span class="upload-card__body">
+                    <strong>Planilha oficial dos GHEs <i>*</i></strong>
+                    <small>Códigos, setores, cargos e população.</small>
+                    <span class="upload-card__action">Selecionar .xlsx</span>
+                    <span class="upload-card__file" data-file-label>Nenhum arquivo selecionado</span>
+                  </span>
+                  <button class="upload-card__remove" type="button" data-remove-file aria-label="Remover arquivo" hidden>×</button>
+                </label>
+
+                <label class="upload-card" data-upload-card>
+                  <input type="file" name="psychosocial_report" accept=".docx" required>
+                  <span class="upload-card__icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M6 2h9l4 4v16H6zM15 2v5h4M9 12h7M9 16h7"></path></svg>
+                  </span>
+                  <span class="upload-card__body">
+                    <strong>Relatório psicossocial bruto <i>*</i></strong>
+                    <small>Painéis, matrizes, radares e gráficos.</small>
+                    <span class="upload-card__action">Selecionar .docx</span>
+                    <span class="upload-card__file" data-file-label>Nenhum arquivo selecionado</span>
+                  </span>
+                  <button class="upload-card__remove" type="button" data-remove-file aria-label="Remover arquivo" hidden>×</button>
+                </label>
+
+                <label class="upload-card" data-upload-card>
+                  <input type="file" name="ergo_report" accept=".doc,.docx" required>
+                  <span class="upload-card__icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M6 2h9l4 4v16H6zM15 2v5h4M9 12h7M9 16h5"></path></svg>
+                  </span>
+                  <span class="upload-card__body">
+                    <strong>Relatório Ergo bruto <i>*</i></strong>
+                    <small>HTML Word ou documento Word válido.</small>
+                    <span class="upload-card__action">Selecionar .doc ou .docx</span>
+                    <span class="upload-card__file" data-file-label>Nenhum arquivo selecionado</span>
+                  </span>
+                  <button class="upload-card__remove" type="button" data-remove-file aria-label="Remover arquivo" hidden>×</button>
+                </label>
+              </div>
+            </div>
+
+            <div class="upload-group">
+              <div class="upload-group__heading">
+                <span>2</span>
+                <div>
+                  <h3>Análises aprovadas</h3>
+                  <p>O compilador preserva o conteúdo técnico, sem reescrevê-lo.</p>
+                </div>
+              </div>
+
+              <div class="upload-grid upload-grid--analysis" id="integrated-uploads">
+                <label class="upload-card upload-card--featured" data-upload-card>
+                  <input type="file" name="integrated_report" accept=".docx" required>
+                  <span class="upload-card__icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M6 2h9l4 4v16H6zM15 2v5h4M9 11h7M9 15h7M9 19h5"></path></svg>
+                  </span>
+                  <span class="upload-card__body">
+                    <strong>Relatório técnico integrado <i>*</i></strong>
+                    <small>Análises, favorabilidade, prioridades, plano e conclusão.</small>
+                    <span class="upload-card__action">Selecionar .docx</span>
+                    <span class="upload-card__file" data-file-label>Nenhum arquivo selecionado</span>
+                  </span>
+                  <button class="upload-card__remove" type="button" data-remove-file aria-label="Remover arquivo" hidden>×</button>
+                </label>
+              </div>
+
+              <div class="upload-grid" id="separate-uploads" hidden>
+                <label class="upload-card" data-upload-card>
+                  <input type="file" name="psychosocial_analysis" accept=".docx">
+                  <span class="upload-card__icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M6 2h9l4 4v16H6zM15 2v5h4M9 12h7M9 16h7"></path></svg>
+                  </span>
+                  <span class="upload-card__body">
+                    <strong>Análise psicossocial — Agente 1 <i>*</i></strong>
+                    <small>Leitura técnica e recomendações aprovadas.</small>
+                    <span class="upload-card__action">Selecionar .docx</span>
+                    <span class="upload-card__file" data-file-label>Nenhum arquivo selecionado</span>
+                  </span>
+                  <button class="upload-card__remove" type="button" data-remove-file aria-label="Remover arquivo" hidden>×</button>
+                </label>
+
+                <label class="upload-card" data-upload-card>
+                  <input type="file" name="ergonomic_analysis" accept=".docx">
+                  <span class="upload-card__icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M6 2h9l4 4v16H6zM15 2v5h4M9 12h7M9 16h7"></path></svg>
+                  </span>
+                  <span class="upload-card__body">
+                    <strong>Análise ergonômica — Agente 2 <i>*</i></strong>
+                    <small>Leitura técnica e recomendações aprovadas.</small>
+                    <span class="upload-card__action">Selecionar .docx</span>
+                    <span class="upload-card__file" data-file-label>Nenhum arquivo selecionado</span>
+                  </span>
+                  <button class="upload-card__remove" type="button" data-remove-file aria-label="Remover arquivo" hidden>×</button>
+                </label>
+              </div>
+            </div>
+
+            <div class="upload-group">
+              <div class="upload-group__heading">
+                <span>3</span>
+                <div>
+                  <h3>Identidade da empresa</h3>
+                  <p>O cartão é obrigatório. A logo pode ser omitida sem deixar espaço vazio.</p>
+                </div>
+              </div>
+              <div class="upload-grid upload-grid--identity">
+                <label class="upload-card" data-upload-card>
+                  <input type="file" name="cnpj_card" accept=".png,.jpg,.jpeg,.webp" required>
+                  <span class="upload-card__icon upload-card__icon--image" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 15l3-3 3 3 2-2 3 3M9 9h.01"></path></svg>
+                  </span>
+                  <span class="upload-card__body">
+                    <strong>Imagem do cartão CNPJ <i>*</i></strong>
+                    <small>PNG, JPG, JPEG ou WEBP.</small>
+                    <span class="upload-card__action">Selecionar imagem</span>
+                    <span class="upload-card__file" data-file-label>Nenhum arquivo selecionado</span>
+                  </span>
+                  <button class="upload-card__remove" type="button" data-remove-file aria-label="Remover arquivo" hidden>×</button>
+                </label>
+
+                <label class="upload-card" data-upload-card>
+                  <input type="file" name="company_logo" accept=".png,.jpg,.jpeg,.webp">
+                  <span class="upload-card__icon upload-card__icon--image" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 15l3-3 3 3 2-2 3 3M9 9h.01"></path></svg>
+                  </span>
+                  <span class="upload-card__body">
+                    <strong>Logo da empresa <b>Opcional</b></strong>
+                    <small>Se ausente, o layout será ajustado automaticamente.</small>
+                    <span class="upload-card__action">Selecionar imagem</span>
+                    <span class="upload-card__file" data-file-label>Nenhum arquivo selecionado</span>
+                  </span>
+                  <button class="upload-card__remove" type="button" data-remove-file aria-label="Remover arquivo" hidden>×</button>
+                </label>
+              </div>
+            </div>
+
+            <label class="compatibility-card">
+              <input type="checkbox" id="compatibility-mode" name="compatibility_mode" value="true">
+              <span class="switch" aria-hidden="true"></span>
+              <span>
+                <strong>Modo de compatibilidade do piloto</strong>
+                <small>Use somente com o perfil privado configurado para o piloto. A exceção fica registrada no relatório.</small>
+              </span>
+            </label>
+
+            <div class="privacy-note">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3M5 10h14v11H5z"></path></svg>
+              <div>
+                <strong>Privacidade preservada</strong>
+                <p>Os arquivos ficam em uma pasta temporária exclusiva e são removidos automaticamente. Nenhum conteúdo é enviado a serviços externos.</p>
+              </div>
+            </div>
+
+            <div class="panel__footer">
+              <button class="button button--ghost" type="button" data-previous-step="1">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m13 4-6 6 6 6"></path></svg>
+                Voltar
+              </button>
+              <button class="button button--primary button--validate" id="validate-button" type="submit">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2a8 8 0 1 0 8 8M6 10l3 3 7-8"></path></svg>
+                Validar arquivos
+              </button>
+            </div>
+          </section>
+        </form>
+
+        <section class="panel" id="step-3" data-step="3" hidden>
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">Etapa 3 de 4</p>
+              <h2>Validação e reconciliação</h2>
+              <p>Confira o que foi encontrado antes da montagem do documento.</p>
+            </div>
+            <span class="status-badge status-badge--success" id="validation-status">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7"></path></svg>
+              Validado
+            </span>
+          </div>
+
+          <div class="metric-grid">
+            <article class="metric">
+              <span class="metric__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M4 20v-9l8-5 8 5v9M9 20v-6h6v6M9 9h6"></path></svg>
+              </span>
+              <div><strong id="ghe-count">0</strong><span>GHEs oficiais</span></div>
+            </article>
+            <article class="metric">
+              <span class="metric__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"></circle><circle cx="17" cy="9" r="2"></circle><path d="M3 20c0-4 2-7 6-7s6 3 6 7M15 14c4 0 6 2 6 6"></path></svg>
+              </span>
+              <div><strong id="population-count">0</strong><span>Colaboradores</span></div>
+            </article>
+            <article class="metric">
+              <span class="metric__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M5 3h14v18H5zM8 8h8M8 12h8M8 16h5"></path></svg>
+              </span>
+              <div><strong id="validated-file-count">0</strong><span>Arquivos verificados</span></div>
+            </article>
+          </div>
+
+          <div class="result-block">
+            <div class="result-block__heading">
+              <div>
+                <h3>GHEs da fonte oficial</h3>
+                <p>A planilha permanece como fonte de verdade.</p>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Código</th>
+                    <th scope="col">Nome do GHE</th>
+                    <th scope="col">Setores</th>
+                    <th scope="col">Cargos</th>
+                    <th scope="col" class="cell-number">Colaboradores</th>
+                  </tr>
+                </thead>
+                <tbody id="ghe-table-body"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="result-block" id="warnings-block" hidden>
+            <div class="result-block__heading">
+              <div>
+                <h3>Avisos da validação</h3>
+                <p>Os itens abaixo serão registrados no relatório de auditoria.</p>
+              </div>
+              <span class="counter-badge" id="warning-count">0</span>
+            </div>
+            <ul class="message-list" id="warning-list"></ul>
+          </div>
+
+          <div class="result-block reconciliation" id="reconciliation-block" hidden>
+            <div class="result-block__heading">
+              <div>
+                <h3>Reconciliação dos GHEs do Ergo</h3>
+                <p>Cada bloco precisa de uma decisão explícita. Nada será renumerado ou excluído silenciosamente.</p>
+              </div>
+              <span class="review-chip">Revisão necessária</span>
+            </div>
+            <div class="reconciliation__legend">
+              <span>Identificação no Ergo</span>
+              <span>Decisão para o documento</span>
+            </div>
+            <div id="reconciliation-list"></div>
+          </div>
+
+          <div class="panel__footer panel__footer--result">
+            <button class="button button--ghost" type="button" id="back-to-files">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m13 4-6 6 6 6"></path></svg>
+              Revisar arquivos
+            </button>
+            <div class="button-cluster">
+              <a class="button button--secondary" id="early-report-link" href="#" hidden>
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3h12v14H4zM7 7h6M7 10h6M7 13h4"></path></svg>
+                Relatório de validação
+              </a>
+              <button class="button button--primary" id="generate-button" type="button">
+                Gerar documento AEP
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4 6 6-6 6"></path></svg>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel panel--processing" id="processing-panel" hidden aria-live="polite">
+          <div class="processing-visual" aria-hidden="true">
+            <span class="processing-visual__document">
+              <svg viewBox="0 0 64 76"><path d="M10 3h29l15 15v55H10z"></path><path d="M39 3v17h15M20 33h24M20 43h24M20 53h18"></path></svg>
+            </span>
+            <span class="processing-visual__ring"></span>
+          </div>
+          <div class="processing-copy">
+            <p class="section-kicker">Processamento local</p>
+            <h2 id="processing-title">Gerando o documento AEP</h2>
+            <p id="processing-stage">Preparando os arquivos…</p>
+            <div class="progress-track" role="progressbar" aria-label="Progresso da geração" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <span id="progress-bar"></span>
+            </div>
+            <div class="progress-meta">
+              <strong id="progress-value">0%</strong>
+              <span>Você pode manter esta página aberta.</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel panel--complete" id="step-4" data-step="4" hidden>
+          <div class="complete-mark" aria-hidden="true">
+            <svg viewBox="0 0 36 36"><path d="m9 18 6 6 13-14"></path></svg>
+          </div>
+          <p class="section-kicker">Etapa 4 de 4</p>
+          <h2>Documento AEP pronto</h2>
+          <p>O arquivo Word continua editável. Guarde também o relatório de validação para auditoria.</p>
+
+          <div class="download-grid">
+            <a class="download-card download-card--primary" id="document-link" href="#">
+              <span class="download-card__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M6 2h9l4 4v16H6zM15 2v5h4M12 10v7M9 14l3 3 3-3"></path></svg>
+              </span>
+              <span><strong>Baixar documento AEP</strong><small>Arquivo Word editável · DOCX</small></span>
+              <svg class="download-card__arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4 6 6-6 6"></path></svg>
+            </a>
+            <a class="download-card" id="report-link" href="#">
+              <span class="download-card__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M6 2h9l4 4v16H6zM15 2v5h4M9 11h7M9 15h7M9 19h4"></path></svg>
+              </span>
+              <span><strong>Relatório de validação</strong><small>Dados, avisos e decisões · JSON</small></span>
+              <svg class="download-card__arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4 6 6-6 6"></path></svg>
+            </a>
+            <button class="download-card is-disabled" type="button" disabled>
+              <span class="download-card__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M6 2h9l4 4v16H6zM15 2v5h4M9 11h7M9 15h7"></path></svg>
+              </span>
+              <span><strong>Exportar PDF</strong><small>Disponível em uma versão futura</small></span>
+              <b>Em breve</b>
+            </button>
+          </div>
+
+          <button class="button button--ghost" id="new-document-button" type="button">
+            Iniciar novo documento
+          </button>
+        </section>
+
+        <section class="error-panel" id="error-panel" hidden role="alert">
+          <span aria-hidden="true">!</span>
+          <div>
+            <strong id="error-title">Não foi possível continuar</strong>
+            <p id="error-message"></p>
+            <ul id="error-fields"></ul>
+          </div>
+          <button type="button" id="dismiss-error" aria-label="Fechar aviso">×</button>
+        </section>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <div class="shell">
+        <p>Automatizador de Documentos AEP <span aria-hidden="true">·</span> Uso local</p>
+        <p>Os relatórios são compilados sem alterar as conclusões técnicas aprovadas.</p>
+      </div>
+    </footer>
+  </body>
+</html>
