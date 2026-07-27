@@ -24,6 +24,7 @@ from app.services.file_security import UploadValidationError, inspect_file
 
 
 MAX_TEMPLATE_BASE64_BYTES = 16 * 1024 * 1024
+MAX_TEMPLATE_PART_BASE64_BYTES = 500 * 1024
 MAX_MANIFEST_BASE64_BYTES = 2 * 1024 * 1024
 MAX_COMPATIBILITY_PROFILE_BASE64_BYTES = 256 * 1024
 
@@ -42,7 +43,7 @@ class HostedTemplateMaterialization:
     runtime_dir: Path | None
 
 
-def _read_and_decode(
+def _read_encoded(
     source: Path,
     *,
     encoded_limit: int,
@@ -52,7 +53,12 @@ def _read_and_decode(
         if source.is_symlink() or not source.is_file():
             raise OSError
         size = source.stat().st_size
-        if size <= 0 or size > encoded_limit:
+        if size <= 0:
+            raise HostedTemplateError(
+                f"O arquivo secreto de {label} está vazio.",
+                code="hosted_template_secret_invalid",
+            )
+        if size > encoded_limit:
             raise HostedTemplateError(
                 f"O segredo Base64 de {label} excede o limite permitido.",
                 code="hosted_template_secret_size",
@@ -65,7 +71,15 @@ def _read_and_decode(
             f"O arquivo secreto de {label} não está disponível.",
             code="hosted_template_secret_unavailable",
         ) from exc
+    if not encoded:
+        raise HostedTemplateError(
+            f"O arquivo secreto de {label} está vazio.",
+            code="hosted_template_secret_invalid",
+        )
+    return encoded
 
+
+def _decode_base64(encoded: bytes, *, label: str) -> bytes:
     try:
         decoded = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as exc:
@@ -79,6 +93,63 @@ def _read_and_decode(
             code="hosted_template_secret_invalid",
         )
     return decoded
+
+
+def _read_and_decode(
+    source: Path,
+    *,
+    encoded_limit: int,
+    label: str,
+) -> bytes:
+    return _decode_base64(
+        _read_encoded(
+            source,
+            encoded_limit=encoded_limit,
+            label=label,
+        ),
+        label=label,
+    )
+
+
+def _read_and_decode_template_parts(sources: tuple[Path, ...]) -> bytes:
+    if not sources or len(sources) > 64:
+        raise HostedTemplateError(
+            "A lista de partes do template é inválida.",
+            code="hosted_template_secret_invalid",
+        )
+    validated_sources: list[Path] = []
+    seen: set[Path] = set()
+    for source in sources:
+        if not source.is_absolute() or source.is_symlink():
+            raise HostedTemplateError(
+                "A lista de partes do template contém caminho inseguro.",
+                code="hosted_template_secret_invalid",
+            )
+        resolved = source.resolve()
+        if resolved in seen:
+            raise HostedTemplateError(
+                "A lista de partes do template contém duplicidade.",
+                code="hosted_template_secret_invalid",
+            )
+        seen.add(resolved)
+        validated_sources.append(source)
+
+    parts: list[bytes] = []
+    total = 0
+    for index, source in enumerate(validated_sources, start=1):
+        encoded = _read_encoded(
+            source,
+            encoded_limit=MAX_TEMPLATE_PART_BASE64_BYTES,
+            label=f"parte {index} do template",
+        )
+        total += len(encoded)
+        if total > MAX_TEMPLATE_BASE64_BYTES:
+            raise HostedTemplateError(
+                "As partes do template excedem o limite permitido.",
+                code="hosted_template_secret_size",
+            )
+        parts.append(encoded)
+    return _decode_base64(b"".join(parts), label="template")
 
 
 def _write_private(path: Path, payload: bytes) -> None:
@@ -161,30 +232,43 @@ def _validate_materialized(template_path: Path, manifest_path: Path) -> None:
 def materialize_hosted_template(
     settings: Settings,
 ) -> HostedTemplateMaterialization:
-    """Decodifica os dois secret files e devolve Settings apontando ao runtime."""
+    """Materializa os segredos privados e devolve Settings para o runtime."""
 
-    template_secret = settings.hosted_template_base64_file
+    template_parts = settings.hosted_template_base64_files
+    if template_parts and settings.hosted_template_base64_file is not None:
+        raise HostedTemplateError(
+            "A configuração do template privado é ambígua.",
+            code="hosted_template_secret_invalid",
+        )
+    template_secret = (
+        None if template_parts else settings.hosted_template_base64_file
+    )
     manifest_secret = settings.hosted_template_manifest_base64_file
     compatibility_secret = settings.hosted_compatibility_profile_base64_file
+    has_template_secret = bool(template_parts) or template_secret is not None
     if (
-        template_secret is None
+        not has_template_secret
         and manifest_secret is None
         and compatibility_secret is None
     ):
         return HostedTemplateMaterialization(settings=settings, runtime_dir=None)
-    if (template_secret is None) != (manifest_secret is None):
+    if has_template_secret != (manifest_secret is not None):
         raise HostedTemplateError(
             "Os dois arquivos secretos do template são obrigatórios.",
             code="hosted_template_secret_incomplete",
         )
 
     template_payload = (
-        _read_and_decode(
-            template_secret,
-            encoded_limit=MAX_TEMPLATE_BASE64_BYTES,
-            label="template",
+        (
+            _read_and_decode_template_parts(template_parts)
+            if template_parts
+            else _read_and_decode(
+                template_secret,
+                encoded_limit=MAX_TEMPLATE_BASE64_BYTES,
+                label="template",
+            )
         )
-        if template_secret is not None
+        if has_template_secret
         else None
     )
     manifest_payload = (

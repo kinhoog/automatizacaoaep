@@ -39,26 +39,30 @@ Antes de codificar, o script:
 - confere o hash, o manifesto de slots e o saneamento;
 - valida o perfil de compatibilidade, quando informado;
 - calcula o tamanho Base64;
+- divide o Base64 do template em partes numeradas de até 450 KiB;
 - recusa diretório de saída fora de `private_templates/`;
-- recusa um conjunto maior que o limite configurado.
+- recusa qualquer Secret File que exceda o limite configurado.
 
 Os resultados ficam em `private_templates/hosted_secret/`:
 
 | Arquivo local privado | Secret File no Render | Variável de caminho |
 | --- | --- | --- |
-| `aep_template.docx.b64` | `aep_template.docx.b64` | `AEP_HOSTED_TEMPLATE_BASE64_FILE=/etc/secrets/aep_template.docx.b64` |
+| `aep_template.docx.b64.part01` | `aep_template.docx.b64.part01` | primeira entrada de `AEP_HOSTED_TEMPLATE_BASE64_FILES` |
+| `aep_template.docx.b64.part02` | `aep_template.docx.b64.part02` | segunda entrada de `AEP_HOSTED_TEMPLATE_BASE64_FILES` |
 | `aep_template.manifest.json.b64` | `aep_template.manifest.json.b64` | `AEP_HOSTED_TEMPLATE_MANIFEST_BASE64_FILE=/etc/secrets/aep_template.manifest.json.b64` |
 | `aep_compatibility_profile.json.b64` | `aep_compatibility_profile.json.b64` | `AEP_HOSTED_COMPATIBILITY_PROFILE_BASE64_FILE=/etc/secrets/aep_compatibility_profile.json.b64` |
 
 Não envie o arquivo de metadados gerado como secret e não copie o conteúdo Base64 para o Git, Dockerfile, Pages, release ou log.
 
-O conjunto privado medido atualmente ocupa **918.504 bytes em Base64**, abaixo do limite conjunto de **1 MiB** aplicado pelo script. Se uma futura versão ultrapassar esse limite:
+No deploy real, o Render recusou um Secret File acima de **500 KiB**. O template atual ocupa **897.648 bytes em Base64**, por isso não cabe em um arquivo secreto único. O preparador gera as duas partes listadas acima, cada uma menor que o limite observado e com tamanho máximo de 450 KiB. O conjunto privado completo ocupa **918.504 bytes em Base64**.
 
-1. não fragmente nem publique o conteúdo em arquivos rastreados;
-2. escolha um mecanismo privado de arquivo secreto com limite suficiente;
-3. monte o arquivo somente no runtime;
-4. mantenha a validação de hash e manifesto antes de habilitar a pipeline;
-5. registre a decisão operacional sem incluir o material privado.
+Se uma futura versão gerar mais partes:
+
+1. cadastre cada parte como Secret File usando o nome numerado gerado;
+2. liste todos os caminhos em `AEP_HOSTED_TEMPLATE_BASE64_FILES`, na ordem;
+3. não fragmente manualmente nem publique o conteúdo em arquivos rastreados;
+4. se o provedor não comportar o conjunto, escolha um mecanismo privado com capacidade suficiente;
+5. mantenha a validação de hash e manifesto antes de habilitar a pipeline.
 
 ## Criar o Blueprint
 
@@ -73,7 +77,7 @@ O conjunto privado medido atualmente ocupa **918.504 bytes em Base64**, abaixo d
 9. mantenha uma única instância, pois os jobs e metadados ficam em memória e não há armazenamento compartilhado;
 10. crie o serviço.
 
-Depois da criação, abra o serviço e cadastre os três **Secret Files**, usando exatamente os nomes da tabela. Cole em cada um apenas o conteúdo Base64 do arquivo correspondente.
+Depois da criação, abra o serviço e cadastre os quatro **Secret Files**, usando exatamente os nomes da tabela. Cole em cada um apenas o conteúdo do arquivo correspondente. As partes do template precisam permanecer separadas no painel.
 
 O `render.yaml` já define:
 
@@ -84,8 +88,13 @@ AEP_RUNTIME_DIR=/tmp/aep-jobs
 AEP_JOB_TTL_SECONDS=900
 AEP_TEMPLATE_PATH=/tmp/aep-runtime/template/aep_template.docx
 AEP_TEMPLATE_MANIFEST_PATH=/tmp/aep-runtime/template/aep_template.manifest.json
+AEP_HOSTED_TEMPLATE_BASE64_FILES=/etc/secrets/aep_template.docx.b64.part01,/etc/secrets/aep_template.docx.b64.part02
+AEP_HOSTED_TEMPLATE_MANIFEST_BASE64_FILE=/etc/secrets/aep_template.manifest.json.b64
+AEP_HOSTED_COMPATIBILITY_PROFILE_BASE64_FILE=/etc/secrets/aep_compatibility_profile.json.b64
 AEP_ALLOW_SYNTHETIC_TEMPLATE_FALLBACK=false
 ```
+
+Separe os caminhos de `AEP_HOSTED_TEMPLATE_BASE64_FILES` somente por vírgula, sem aspas, espaços ou alteração da ordem. Não configure simultaneamente a variável legada `AEP_HOSTED_TEMPLATE_BASE64_FILE`; a configuração multipartida é a forma esperada no Render.
 
 O provedor fornece `PORT`; o valor do Blueprint serve como configuração inicial. Não grave uma URL interna, token ou credencial nessas variáveis.
 
@@ -93,11 +102,13 @@ O provedor fornece `PORT`; o valor do Blueprint serve como configuração inicia
 
 No início do processo:
 
-1. a aplicação lê os três arquivos Base64 pelos caminhos configurados;
-2. decodifica o material em um subdiretório privado e aleatório sob `/tmp/aep-jobs/`;
-3. verifica hash, manifesto, estrutura e saneamento;
-4. disponibiliza o perfil de compatibilidade no diretório privado do runtime;
-5. mantém a pipeline fechada se qualquer validação obrigatória falhar.
+1. a aplicação lê as partes do template na ordem declarada;
+2. concatena os bytes Base64 sem inserir separadores;
+3. lê o manifesto e o perfil pelos caminhos individuais;
+4. decodifica o material em um subdiretório privado e aleatório sob `/tmp/aep-jobs/`;
+5. verifica hash, manifesto, estrutura e saneamento;
+6. disponibiliza o perfil de compatibilidade no diretório privado do runtime;
+7. mantém a pipeline fechada se faltar uma parte, a ordem estiver errada ou qualquer validação obrigatória falhar.
 
 O endpoint de health deve responder `200` somente quando a aplicação e a pipeline estiverem prontas:
 

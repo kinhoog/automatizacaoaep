@@ -39,6 +39,40 @@ def _allowed_origins(value: str | None) -> tuple[str, ...]:
     return tuple(origins)
 
 
+def _hosted_secret_files(value: str | None) -> tuple[Path, ...]:
+    if value is None:
+        return ()
+    raw_items = value.split(",")
+    if (
+        not raw_items
+        or len(raw_items) > 64
+        or any(not item.strip() for item in raw_items)
+    ):
+        raise ValueError(
+            "AEP_HOSTED_TEMPLATE_BASE64_FILES contém uma lista inválida."
+        )
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for item in raw_items:
+        source = Path(item.strip()).expanduser()
+        if not source.is_absolute():
+            raise ValueError(
+                "AEP_HOSTED_TEMPLATE_BASE64_FILES exige caminhos absolutos."
+            )
+        if source.is_symlink():
+            raise ValueError(
+                "AEP_HOSTED_TEMPLATE_BASE64_FILES não aceita links simbólicos."
+            )
+        resolved = source.resolve()
+        if resolved in seen:
+            raise ValueError(
+                "AEP_HOSTED_TEMPLATE_BASE64_FILES contém caminhos duplicados."
+            )
+        seen.add(resolved)
+        paths.append(source)
+    return tuple(paths)
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     base_dir: Path
@@ -60,6 +94,7 @@ class Settings:
     allowed_origins: tuple[str, ...] = ("https://kinhoog.github.io",)
     require_origin: bool = True
     hosted_template_base64_file: Path | None = None
+    hosted_template_base64_files: tuple[Path, ...] = ()
     hosted_template_manifest_base64_file: Path | None = None
     hosted_compatibility_profile_base64_file: Path | None = None
     trusted_private_runtime_dir: Path | None = None
@@ -106,6 +141,15 @@ class Settings:
         hosted_template_value = os.getenv(
             "AEP_HOSTED_TEMPLATE_BASE64_FILE", ""
         ).strip()
+        hosted_template_files = _hosted_secret_files(
+            os.getenv("AEP_HOSTED_TEMPLATE_BASE64_FILES")
+        )
+        if hosted_template_value and hosted_template_files:
+            raise ValueError(
+                "AEP_HOSTED_TEMPLATE_BASE64_FILE e "
+                "AEP_HOSTED_TEMPLATE_BASE64_FILES não podem ser "
+                "configuradas juntas."
+            )
         hosted_manifest_value = os.getenv(
             "AEP_HOSTED_TEMPLATE_MANIFEST_BASE64_FILE", ""
         ).strip()
@@ -160,6 +204,7 @@ class Settings:
                 if hosted_template_value
                 else None
             ),
+            hosted_template_base64_files=hosted_template_files,
             hosted_template_manifest_base64_file=(
                 Path(hosted_manifest_value).expanduser().resolve()
                 if hosted_manifest_value

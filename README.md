@@ -202,7 +202,7 @@ Crie o serviço como um [Render Blueprint](https://render.com/docs/infrastructur
 
 No plano gratuito, o serviço pode hibernar após 15 minutos sem tráfego e levar cerca de um minuto para responder à primeira chamada seguinte. Esse comportamento é aceitável para o piloto; uma mudança futura para instância paga é uma decisão operacional e financeira separada.
 
-O template não entra no Git nem na imagem. Prepare os três arquivos Base64 privados:
+O template não entra no Git nem na imagem. No deploy real, o Render recusou um Secret File acima de 500 KiB; por isso o preparador divide o Base64 do template em partes de no máximo 450 KiB:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\prepare_hosted_template_secret.py `
@@ -213,13 +213,22 @@ O template não entra no Git nem na imagem. Prepare os três arquivos Base64 pri
 
 O resultado fica em `private_templates/hosted_secret/`, também ignorado:
 
-- `aep_template.docx.b64`;
+- `aep_template.docx.b64.part01`;
+- `aep_template.docx.b64.part02`;
 - `aep_template.manifest.json.b64`;
 - `aep_compatibility_profile.json.b64`.
 
-No Render, cadastre-os como **Secret Files** com esses nomes. Eles ficam disponíveis, respectivamente, nos caminhos `/etc/secrets/aep_template.docx.b64`, `/etc/secrets/aep_template.manifest.json.b64` e `/etc/secrets/aep_compatibility_profile.json.b64`. O backend decodifica os arquivos em área temporária, confere hash e manifesto e mantém a pipeline indisponível se a validação falhar. Consulte [Environment Variables and Secrets](https://render.com/docs/configure-environment-variables).
+No Render, cadastre os quatro **Secret Files** com esses nomes. Configure as partes do template, na ordem, em uma única variável:
 
-A medição local do conjunto atual foi de **918.504 bytes em Base64**, abaixo do limite conjunto de **1 MiB** usado na preparação. O script recusa a geração se o limite configurado for excedido. Se uma versão futura ultrapassar esse limite, use um mecanismo privado do provedor com capacidade maior, sem publicar o template no repositório, no Pages, em release ou na imagem.
+```text
+AEP_HOSTED_TEMPLATE_BASE64_FILES=/etc/secrets/aep_template.docx.b64.part01,/etc/secrets/aep_template.docx.b64.part02
+AEP_HOSTED_TEMPLATE_MANIFEST_BASE64_FILE=/etc/secrets/aep_template.manifest.json.b64
+AEP_HOSTED_COMPATIBILITY_PROFILE_BASE64_FILE=/etc/secrets/aep_compatibility_profile.json.b64
+```
+
+O backend concatena as partes do template na ordem declarada, decodifica o conteúdo em área temporária, confere hash e manifesto e mantém a pipeline indisponível se a validação falhar. Não configure a variável legada de arquivo único junto com `AEP_HOSTED_TEMPLATE_BASE64_FILES`. Consulte [Environment Variables and Secrets](https://render.com/docs/configure-environment-variables).
+
+A medição local atual é de **897.648 bytes** para o Base64 do template e **918.504 bytes** para o conjunto privado. As duas partes do template ficam abaixo do limite de 500 KiB por Secret File. O script usa partes de até 450 KiB e recusa artefatos que não possam ser preparados com segurança. Se uma versão futura produzir mais partes, cadastre todas como Secret Files e liste seus caminhos em ordem; se o provedor não comportar o conjunto, use um mecanismo privado com capacidade maior, sem publicar o template no repositório, no Pages, em release ou na imagem.
 
 Depois que o Render fornecer a URL HTTPS:
 

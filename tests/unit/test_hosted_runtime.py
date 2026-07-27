@@ -10,6 +10,7 @@ import pytest
 from app.config import Settings
 from app.services.hosted_template import (
     HostedTemplateError,
+    MAX_TEMPLATE_PART_BASE64_BYTES,
     materialize_hosted_template,
     remove_materialized_template,
 )
@@ -88,6 +89,198 @@ def test_settings_rejects_wildcard_cors(
 
     with pytest.raises(ValueError, match="curinga"):
         Settings.from_env(tmp_path)
+
+
+def test_settings_preserves_ordered_template_parts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = (tmp_path / "template.part-001.b64").resolve()
+    second = (tmp_path / "template.part-002.b64").resolve()
+    monkeypatch.setenv(
+        "AEP_HOSTED_TEMPLATE_BASE64_FILES",
+        f"{first},{second}",
+    )
+
+    settings = Settings.from_env(tmp_path)
+
+    assert settings.hosted_template_base64_files == (first, second)
+    assert settings.hosted_template_base64_file is None
+
+
+def test_settings_rejects_ambiguous_legacy_and_split_template_secrets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    part = (tmp_path / "template.part-001.b64").resolve()
+    legacy = (tmp_path / "template-legacy.b64").resolve()
+    monkeypatch.setenv("AEP_HOSTED_TEMPLATE_BASE64_FILES", str(part))
+    monkeypatch.setenv("AEP_HOSTED_TEMPLATE_BASE64_FILE", str(legacy))
+
+    with pytest.raises(ValueError, match="não podem ser configuradas juntas"):
+        Settings.from_env(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        "",
+        "/tmp/parte-1.b64,,/tmp/parte-2.b64",
+        "parte-relativa.b64",
+    ],
+)
+def test_settings_rejects_unsafe_template_part_lists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured: str,
+) -> None:
+    monkeypatch.setenv("AEP_HOSTED_TEMPLATE_BASE64_FILES", configured)
+
+    with pytest.raises(ValueError, match="AEP_HOSTED_TEMPLATE_BASE64_FILES"):
+        Settings.from_env(tmp_path)
+
+
+def test_settings_rejects_duplicate_absolute_template_parts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repeated = (tmp_path / "repetida.b64").resolve()
+    monkeypatch.setenv(
+        "AEP_HOSTED_TEMPLATE_BASE64_FILES",
+        f"{repeated},{repeated}",
+    )
+
+    with pytest.raises(ValueError, match="duplicados"):
+        Settings.from_env(tmp_path)
+
+
+def test_split_hosted_template_is_concatenated_in_declared_order(
+    tmp_path: Path,
+) -> None:
+    template, manifest = _sanitized_pair(tmp_path)
+    encoded = base64.b64encode(template.read_bytes())
+    first_cut = len(encoded) // 3 + 1
+    second_cut = (2 * len(encoded)) // 3 + 2
+    parts = (
+        tmp_path / "template.part-001.b64",
+        tmp_path / "template.part-002.b64",
+        tmp_path / "template.part-003.b64",
+    )
+    for path, payload in zip(
+        parts,
+        (
+            encoded[:first_cut],
+            encoded[first_cut:second_cut],
+            encoded[second_cut:],
+        ),
+        strict=True,
+    ):
+        path.write_bytes(payload)
+    settings = replace(
+        _settings(tmp_path),
+        hosted_template_base64_files=parts,
+        hosted_template_manifest_base64_file=_secret(
+            tmp_path / "manifest.b64", manifest.read_bytes()
+        ),
+    )
+
+    materialized = materialize_hosted_template(settings)
+    try:
+        assert materialized.settings.template_path.read_bytes() == (
+            template.read_bytes()
+        )
+    finally:
+        remove_materialized_template(materialized.runtime_dir)
+
+
+def test_materializer_rejects_ambiguous_legacy_and_split_template_secrets(
+    tmp_path: Path,
+) -> None:
+    settings = replace(
+        _settings(tmp_path),
+        hosted_template_base64_file=(tmp_path / "legacy.b64").resolve(),
+        hosted_template_base64_files=(
+            (tmp_path / "template.part-001.b64").resolve(),
+        ),
+    )
+
+    with pytest.raises(HostedTemplateError) as raised:
+        materialize_hosted_template(settings)
+
+    assert raised.value.code == "hosted_template_secret_invalid"
+
+
+@pytest.mark.parametrize("failure", ["missing", "empty", "duplicate"])
+def test_split_hosted_template_rejects_invalid_part_sets(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    template, manifest = _sanitized_pair(tmp_path)
+    encoded = base64.b64encode(template.read_bytes())
+    first = (tmp_path / "template.part-001.b64").resolve()
+    second = (tmp_path / "template.part-002.b64").resolve()
+    first.write_bytes(encoded[: len(encoded) // 2])
+    if failure == "empty":
+        second.write_bytes(b"")
+    elif failure != "missing":
+        second.write_bytes(encoded[len(encoded) // 2 :])
+    parts = (first, first) if failure == "duplicate" else (first, second)
+    settings = replace(
+        _settings(tmp_path),
+        hosted_template_base64_files=parts,
+        hosted_template_manifest_base64_file=_secret(
+            tmp_path / "manifest.b64", manifest.read_bytes()
+        ),
+    )
+
+    with pytest.raises(HostedTemplateError) as raised:
+        materialize_hosted_template(settings)
+
+    assert raised.value.code in {
+        "hosted_template_secret_invalid",
+        "hosted_template_secret_unavailable",
+    }
+
+
+def test_split_hosted_template_rejects_part_above_provider_limit(
+    tmp_path: Path,
+) -> None:
+    oversized = (tmp_path / "template.part-001.b64").resolve()
+    oversized.write_bytes(b"A" * (MAX_TEMPLATE_PART_BASE64_BYTES + 1))
+    settings = replace(
+        _settings(tmp_path),
+        hosted_template_base64_files=(oversized,),
+        hosted_template_manifest_base64_file=(
+            tmp_path / "manifest-not-read.b64"
+        ).resolve(),
+    )
+
+    with pytest.raises(HostedTemplateError) as raised:
+        materialize_hosted_template(settings)
+
+    assert raised.value.code == "hosted_template_secret_size"
+
+
+def test_split_hosted_template_rejects_aggregate_above_runtime_limit(
+    tmp_path: Path,
+) -> None:
+    parts: list[Path] = []
+    for index in range(33):
+        part = (tmp_path / f"template.part-{index:03d}.b64").resolve()
+        part.write_bytes(b"A" * MAX_TEMPLATE_PART_BASE64_BYTES)
+        parts.append(part)
+    settings = replace(
+        _settings(tmp_path),
+        hosted_template_base64_files=tuple(parts),
+        hosted_template_manifest_base64_file=(
+            tmp_path / "manifest-not-read.b64"
+        ).resolve(),
+    )
+
+    with pytest.raises(HostedTemplateError) as raised:
+        materialize_hosted_template(settings)
+
+    assert raised.value.code == "hosted_template_secret_size"
 
 
 def test_hosted_template_and_optional_profile_are_materialized_privately(

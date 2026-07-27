@@ -28,8 +28,11 @@ from app.services.file_security import inspect_file
 
 
 RENDER_SECRET_FILES_LIMIT_BYTES = 1024 * 1024
+RENDER_SECRET_FILE_MAX_BYTES = 500 * 1024
+DEFAULT_TEMPLATE_PART_BYTES = 450 * 1024
 DEFAULT_OUTPUT_DIR = Path("private_templates/hosted_secret")
 TEMPLATE_SECRET_NAME = "aep_template.docx.b64"
+TEMPLATE_PART_GLOB = f"{TEMPLATE_SECRET_NAME}.part*"
 MANIFEST_SECRET_NAME = "aep_template.manifest.json.b64"
 COMPATIBILITY_PROFILE_SECRET_NAME = "aep_compatibility_profile.json.b64"
 METADATA_NAME = "hosted_template_secret.metadata.json"
@@ -48,8 +51,16 @@ class SecretArtifact:
 
 
 @dataclass(frozen=True, slots=True)
+class SecretPartArtifact:
+    filename: str
+    base64_bytes: int
+    encoded_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class HostedTemplateSecretBundle:
     template: SecretArtifact
+    template_parts: tuple[SecretPartArtifact, ...]
     manifest: SecretArtifact
     compatibility_profile: SecretArtifact | None
     total_base64_bytes: int
@@ -165,6 +176,44 @@ def _artifact(
     )
 
 
+def _split_template_secret(
+    encoded: bytes,
+    *,
+    part_bytes: int,
+    secret_file_limit_bytes: int,
+) -> tuple[tuple[SecretPartArtifact, ...], tuple[bytes, ...]]:
+    if (
+        part_bytes <= 0
+        or secret_file_limit_bytes <= 0
+        or part_bytes > secret_file_limit_bytes
+    ):
+        raise HostedTemplateSecretError(
+            "O tamanho das partes deve ser positivo e não pode exceder "
+            "o limite individual do provedor."
+        )
+    chunks = tuple(
+        encoded[offset : offset + part_bytes]
+        for offset in range(0, len(encoded), part_bytes)
+    )
+    if not chunks:
+        raise HostedTemplateSecretError(
+            "O template Base64 não pode ser dividido com segurança."
+        )
+    if len(chunks) > 64:
+        raise HostedTemplateSecretError(
+            "O template exigiria mais de 64 arquivos secretos."
+        )
+    artifacts = tuple(
+        SecretPartArtifact(
+            filename=f"{TEMPLATE_SECRET_NAME}.part{index:02d}",
+            base64_bytes=len(chunk),
+            encoded_sha256=hashlib.sha256(chunk).hexdigest(),
+        )
+        for index, chunk in enumerate(chunks, start=1)
+    )
+    return artifacts, chunks
+
+
 def _write_private_text(
     path: Path,
     payload: bytes,
@@ -194,6 +243,8 @@ def prepare_hosted_template_secret(
     compatibility_profile_path: Path | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     provider_limit_bytes: int = RENDER_SECRET_FILES_LIMIT_BYTES,
+    secret_file_limit_bytes: int = RENDER_SECRET_FILE_MAX_BYTES,
+    template_part_bytes: int = DEFAULT_TEMPLATE_PART_BYTES,
     project_root: Path | None = None,
 ) -> HostedTemplateSecretBundle:
     """Validate and encode a private template into Render secret-file payloads."""
@@ -215,6 +266,10 @@ def prepare_hosted_template_secret(
     if provider_limit_bytes <= 0:
         raise HostedTemplateSecretError(
             "O limite do provedor deve ser maior que zero."
+        )
+    if secret_file_limit_bytes <= 0:
+        raise HostedTemplateSecretError(
+            "O limite individual do provedor deve ser maior que zero."
         )
 
     _validate_private_template(template, manifest)
@@ -267,6 +322,23 @@ def prepare_hosted_template_secret(
         raise HostedTemplateSecretError(
             "A medição dos artefatos Base64 foi inconsistente."
         )
+    template_parts, template_chunks = _split_template_secret(
+        template_encoded,
+        part_bytes=template_part_bytes,
+        secret_file_limit_bytes=secret_file_limit_bytes,
+    )
+    for artifact in (
+        manifest_artifact,
+        compatibility_artifact,
+    ):
+        if (
+            artifact is not None
+            and artifact.base64_bytes > secret_file_limit_bytes
+        ):
+            raise HostedTemplateSecretError(
+                f"O Secret File {artifact.filename} excede o limite "
+                "individual do provedor."
+            )
 
     try:
         destination.mkdir(parents=True, exist_ok=True)
@@ -275,7 +347,17 @@ def prepare_hosted_template_secret(
         raise HostedTemplateSecretError(
             "Não foi possível preparar o diretório privado de saída."
         ) from exc
-    _write_private_text(destination / TEMPLATE_SECRET_NAME, template_encoded)
+    try:
+        (destination / TEMPLATE_SECRET_NAME).unlink(missing_ok=True)
+        for stale_part in destination.glob(TEMPLATE_PART_GLOB):
+            if stale_part.is_file() and not stale_part.is_symlink():
+                stale_part.unlink()
+    except OSError as exc:
+        raise HostedTemplateSecretError(
+            "Não foi possível substituir as partes privadas do template."
+        ) from exc
+    for artifact, chunk in zip(template_parts, template_chunks, strict=True):
+        _write_private_text(destination / artifact.filename, chunk)
     _write_private_text(destination / MANIFEST_SECRET_NAME, manifest_encoded)
     if (
         compatibility_artifact is not None
@@ -292,6 +374,7 @@ def prepare_hosted_template_secret(
 
     bundle = HostedTemplateSecretBundle(
         template=template_artifact,
+        template_parts=template_parts,
         manifest=manifest_artifact,
         compatibility_profile=compatibility_artifact,
         total_base64_bytes=total,
@@ -304,6 +387,9 @@ def prepare_hosted_template_secret(
         "provider": "render",
         "secret_files": {
             "template": asdict(template_artifact),
+            "template_parts": [
+                asdict(artifact) for artifact in template_parts
+            ],
             "manifest": asdict(manifest_artifact),
             "compatibility_profile": (
                 asdict(compatibility_artifact)
@@ -315,7 +401,10 @@ def prepare_hosted_template_secret(
         "provider_limit_bytes": bundle.provider_limit_bytes,
         "remaining_bytes": bundle.remaining_bytes,
         "render_paths": {
-            "template": "/etc/secrets/aep_template.docx.b64",
+            "template_parts": [
+                f"/etc/secrets/{artifact.filename}"
+                for artifact in template_parts
+            ],
             "manifest": "/etc/secrets/aep_template.manifest.json.b64",
             "compatibility_profile": (
                 "/etc/secrets/aep_compatibility_profile.json.b64"
@@ -356,6 +445,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=int,
         default=RENDER_SECRET_FILES_LIMIT_BYTES,
     )
+    parser.add_argument(
+        "--secret-file-limit-bytes",
+        type=int,
+        default=RENDER_SECRET_FILE_MAX_BYTES,
+    )
+    parser.add_argument(
+        "--template-part-bytes",
+        type=int,
+        default=DEFAULT_TEMPLATE_PART_BYTES,
+    )
     args = parser.parse_args(argv)
     try:
         bundle = prepare_hosted_template_secret(
@@ -364,6 +463,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             compatibility_profile_path=args.compatibility_profile,
             output_dir=args.output_dir,
             provider_limit_bytes=args.provider_limit_bytes,
+            secret_file_limit_bytes=args.secret_file_limit_bytes,
+            template_part_bytes=args.template_part_bytes,
         )
     except HostedTemplateSecretError as exc:
         parser.error(str(exc))

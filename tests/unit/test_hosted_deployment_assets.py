@@ -10,9 +10,12 @@ import pytest
 
 from scripts.prepare_hosted_template_secret import (
     COMPATIBILITY_PROFILE_SECRET_NAME,
+    DEFAULT_TEMPLATE_PART_BYTES,
     MANIFEST_SECRET_NAME,
     METADATA_NAME,
+    RENDER_SECRET_FILE_MAX_BYTES,
     TEMPLATE_SECRET_NAME,
+    TEMPLATE_PART_GLOB,
     HostedTemplateSecretError,
     main,
     prepare_hosted_template_secret,
@@ -64,15 +67,26 @@ def test_hosted_template_secret_round_trip_and_private_output(
             compatibility_profile_path=compatibility_profile,
             output_dir=private_output,
         )
-        template_secret = private_output / TEMPLATE_SECRET_NAME
+        template_parts = tuple(
+            sorted(private_output.glob(TEMPLATE_PART_GLOB))
+        )
         manifest_secret = private_output / MANIFEST_SECRET_NAME
         metadata_path = private_output / METADATA_NAME
         compatibility_secret = (
             private_output / COMPATIBILITY_PROFILE_SECRET_NAME
         )
 
-        assert base64.b64decode(template_secret.read_text().strip()) == (
-            template.read_bytes()
+        assert template_parts
+        assert not (private_output / TEMPLATE_SECRET_NAME).exists()
+        joined_template_base64 = b"".join(
+            path.read_bytes() for path in template_parts
+        )
+        assert base64.b64decode(
+            joined_template_base64, validate=True
+        ) == template.read_bytes()
+        assert all(
+            0 < path.stat().st_size <= DEFAULT_TEMPLATE_PART_BYTES
+            for path in template_parts
         )
         assert base64.b64decode(manifest_secret.read_text().strip()) == (
             manifest.read_bytes()
@@ -81,10 +95,13 @@ def test_hosted_template_secret_round_trip_and_private_output(
             compatibility_secret.read_text().strip()
         ) == compatibility_profile.read_bytes()
         assert bundle.total_base64_bytes == (
-            len(template_secret.read_text().strip())
+            len(joined_template_base64)
             + len(manifest_secret.read_text().strip())
             + len(compatibility_secret.read_text().strip())
         )
+        assert tuple(
+            artifact.filename for artifact in bundle.template_parts
+        ) == tuple(path.name for path in template_parts)
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         assert metadata["remaining_bytes"] > 0
         assert metadata["render_paths"] == {
@@ -92,7 +109,9 @@ def test_hosted_template_secret_round_trip_and_private_output(
                 "/etc/secrets/aep_compatibility_profile.json.b64"
             ),
             "manifest": "/etc/secrets/aep_template.manifest.json.b64",
-            "template": "/etc/secrets/aep_template.docx.b64",
+            "template_parts": [
+                f"/etc/secrets/{path.name}" for path in template_parts
+            ],
         }
 
         assert (
@@ -169,6 +188,32 @@ def test_hosted_template_secret_enforces_provider_limit(
         shutil.rmtree(private_output, ignore_errors=True)
 
 
+def test_hosted_template_secret_enforces_individual_file_limit(
+    tmp_path: Path,
+) -> None:
+    template, manifest = _sanitized_template(tmp_path)
+    private_output = (
+        PROJECT_ROOT
+        / "private_templates"
+        / "pytest-hosted-secret-individual-limit"
+    )
+    try:
+        with pytest.raises(
+            HostedTemplateSecretError,
+            match="limite individual",
+        ):
+            prepare_hosted_template_secret(
+                template,
+                manifest,
+                output_dir=private_output,
+                secret_file_limit_bytes=8 * 1024,
+                template_part_bytes=8 * 1024,
+            )
+        assert not private_output.exists()
+    finally:
+        shutil.rmtree(private_output, ignore_errors=True)
+
+
 def test_dockerfile_and_render_blueprint_are_hardened_for_hosting() -> None:
     dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
     blueprint = (PROJECT_ROOT / "render.yaml").read_text(encoding="utf-8")
@@ -204,7 +249,11 @@ def test_dockerfile_and_render_blueprint_are_hardened_for_hosting() -> None:
     assert "AEP_REQUIRE_ORIGIN" in blueprint
     assert "AEP_JOB_TTL_SECONDS" in blueprint
     assert 'value: "900"' in blueprint
-    assert "/etc/secrets/aep_template.docx.b64" in blueprint
+    assert "AEP_HOSTED_TEMPLATE_BASE64_FILES" in blueprint
+    assert "/etc/secrets/aep_template.docx.b64.part01" in blueprint
+    assert "/etc/secrets/aep_template.docx.b64.part02" in blueprint
+    assert "AEP_HOSTED_TEMPLATE_BASE64_FILE\n" not in blueprint
+    assert DEFAULT_TEMPLATE_PART_BYTES < RENDER_SECRET_FILE_MAX_BYTES
     assert "/etc/secrets/aep_template.manifest.json.b64" in blueprint
     assert "/etc/secrets/aep_compatibility_profile.json.b64" in blueprint
     assert "numInstances: 1" in blueprint
@@ -230,6 +279,7 @@ def test_dockerfile_and_render_blueprint_are_hardened_for_hosting() -> None:
     )
     for private_marker in (
         "AEP_HOSTED_TEMPLATE_BASE64_FILE",
+        "AEP_HOSTED_TEMPLATE_BASE64_FILES",
         "AEP_HOSTED_TEMPLATE_MANIFEST_BASE64_FILE",
         "AEP_HOSTED_COMPATIBILITY_PROFILE_BASE64_FILE",
         "aep_template.docx.b64",

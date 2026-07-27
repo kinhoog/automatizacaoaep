@@ -29,8 +29,8 @@ services:
         value: /tmp/aep-runtime/template/aep_template.docx
       - key: AEP_TEMPLATE_MANIFEST_PATH
         value: /tmp/aep-runtime/template/aep_template.manifest.json
-      - key: AEP_HOSTED_TEMPLATE_BASE64_FILE
-        value: /etc/secrets/aep_template.docx.b64
+      - key: AEP_HOSTED_TEMPLATE_BASE64_FILES
+        value: /etc/secrets/aep_template.docx.b64.part01,/etc/secrets/aep_template.docx.b64.part02
       - key: AEP_HOSTED_TEMPLATE_MANIFEST_BASE64_FILE
         value: /etc/secrets/aep_template.manifest.json.b64
       - key: AEP_HOSTED_COMPATIBILITY_PROFILE_BASE64_FILE
