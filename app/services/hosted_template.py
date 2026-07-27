@@ -50,9 +50,10 @@ def _read_encoded(
     label: str,
 ) -> bytes:
     try:
-        if source.is_symlink() or not source.is_file():
+        resolved = source.resolve(strict=True)
+        if not resolved.is_file():
             raise OSError
-        size = source.stat().st_size
+        size = resolved.stat().st_size
         if size <= 0:
             raise HostedTemplateError(
                 f"O arquivo secreto de {label} está vazio.",
@@ -63,7 +64,7 @@ def _read_encoded(
                 f"O segredo Base64 de {label} excede o limite permitido.",
                 code="hosted_template_secret_size",
             )
-        encoded = b"".join(source.read_bytes().split())
+        encoded = b"".join(resolved.read_bytes().split())
     except HostedTemplateError:
         raise
     except OSError as exc:
@@ -120,7 +121,7 @@ def _read_and_decode_template_parts(sources: tuple[Path, ...]) -> bytes:
     validated_sources: list[Path] = []
     seen: set[Path] = set()
     for source in sources:
-        if not source.is_absolute() or source.is_symlink():
+        if not source.is_absolute():
             raise HostedTemplateError(
                 "A lista de partes do template contém caminho inseguro.",
                 code="hosted_template_secret_invalid",

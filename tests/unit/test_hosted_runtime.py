@@ -193,6 +193,38 @@ def test_split_hosted_template_is_concatenated_in_declared_order(
         remove_materialized_template(materialized.runtime_dir)
 
 
+def test_provider_managed_secret_symlinks_are_resolved_and_validated(
+    tmp_path: Path,
+) -> None:
+    template, manifest = _sanitized_pair(tmp_path)
+    template_target = _secret(
+        tmp_path / "template-target.b64", template.read_bytes()
+    )
+    manifest_target = _secret(
+        tmp_path / "manifest-target.b64", manifest.read_bytes()
+    )
+    template_link = tmp_path / "template-link.b64"
+    manifest_link = tmp_path / "manifest-link.b64"
+    try:
+        template_link.symlink_to(template_target)
+        manifest_link.symlink_to(manifest_target)
+    except OSError:
+        pytest.skip("O host local não permite criar links simbólicos.")
+    settings = replace(
+        _settings(tmp_path),
+        hosted_template_base64_files=(template_link,),
+        hosted_template_manifest_base64_file=manifest_link,
+    )
+
+    materialized = materialize_hosted_template(settings)
+    try:
+        assert materialized.settings.template_path.read_bytes() == (
+            template.read_bytes()
+        )
+    finally:
+        remove_materialized_template(materialized.runtime_dir)
+
+
 def test_materializer_rejects_ambiguous_legacy_and_split_template_secrets(
     tmp_path: Path,
 ) -> None:

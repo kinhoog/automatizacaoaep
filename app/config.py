@@ -59,10 +59,6 @@ def _hosted_secret_files(value: str | None) -> tuple[Path, ...]:
             raise ValueError(
                 "AEP_HOSTED_TEMPLATE_BASE64_FILES exige caminhos absolutos."
             )
-        if source.is_symlink():
-            raise ValueError(
-                "AEP_HOSTED_TEMPLATE_BASE64_FILES não aceita links simbólicos."
-            )
         resolved = source.resolve()
         if resolved in seen:
             raise ValueError(
